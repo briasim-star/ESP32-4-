@@ -1,5 +1,4 @@
 name: Build and publish firmware
-
 on:
 push:
 branches: [main]
@@ -8,42 +7,34 @@ paths:
 - "extras/**"
 - ".github/workflows/build_and_publish.yml"
 workflow_dispatch: {}
-
 permissions:
 contents: write
-
 jobs:
 build:
 runs-on: ubuntu-latest
 steps:
 - name: Check out repository
 uses: actions/checkout@v4
-
 - name: Install arduino-cli
 run: |
 curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
 echo "$PWD/bin" >> "$GITHUB_PATH"
-
 - name: Configure arduino-cli for ESP32
 run: |
 arduino-cli config init
 arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 arduino-cli core update-index
 arduino-cli core install esp32:esp32@2.0.17
-
 - name: Install required libraries
 run: |
 arduino-cli lib install "TFT_eSPI"
 arduino-cli lib install "ESP32-A2DP"
-
 - name: Apply our TFT_eSPI display configuration
 run: |
 cp extras/TFT_eSPI_User_Setup.h "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
-
 - name: Compile firmware
 run: |
 arduino-cli compile --fqbn esp32:esp32:esp32 --export-binaries --output-dir build_output PEMF_Controller/PEMF_Controller.ino
-
 - name: Collect binaries for the web installer
 run: |
 mkdir -p docs/firmware
@@ -52,7 +43,6 @@ cp build_output/PEMF_Controller.ino.partitions.bin docs/firmware/partitions.bin
 cp build_output/PEMF_Controller.ino.bin docs/firmware/firmware.bin
 BOOT_APP0=$(find "$HOME/.arduino15/packages/esp32" -name "boot_app0.bin" | head -n1)
 cp "$BOOT_APP0" docs/firmware/boot_app0.bin
-
 - name: Commit and push updated firmware
 run: |
 git config user.name "github-actions[bot]"
