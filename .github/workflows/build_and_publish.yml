@@ -33,6 +33,7 @@ jobs:
 
       - name: Install required libraries
         run: |
+          arduino-cli lib update-index
           arduino-cli lib install "TFT_eSPI"
           arduino-cli lib install "ESP32-A2DP"
 
@@ -42,14 +43,18 @@ jobs:
 
       - name: Compile firmware
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 --export-binaries --output-dir build_output PEMF_Controller/PEMF_Controller.ino
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --export-binaries \
+            --output-dir build_output \
+            PEMF_Controller/PEMF_Controller.ino
 
       - name: Collect binaries for the web installer
         run: |
           mkdir -p docs/firmware
           cp build_output/PEMF_Controller.ino.bootloader.bin docs/firmware/bootloader.bin
           cp build_output/PEMF_Controller.ino.partitions.bin docs/firmware/partitions.bin
-          cp build_output/PEMF_Controller.ino.bin docs/firmware/firmware.bin
+          cp build_output/PEMF_Controller.ino.bin            docs/firmware/firmware.bin
           BOOT_APP0=$(find "$HOME/.arduino15/packages/esp32" -name "boot_app0.bin" | head -n1)
           cp "$BOOT_APP0" docs/firmware/boot_app0.bin
 
