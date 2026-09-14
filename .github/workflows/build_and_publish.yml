@@ -1,4 +1,4 @@
-ame: Build and publish firmware
+name: Build and publish firmware
 
 on:
   push:
