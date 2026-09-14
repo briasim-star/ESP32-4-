@@ -35,7 +35,7 @@ jobs:
         run: |
           arduino-cli lib update-index
           arduino-cli lib install "TFT_eSPI"
-          arduino-cli lib install "ESP32-A2DP"
+          arduino-cli lib install --git-url https://github.com/pschatzmann/ESP32-A2DP.git
 
       - name: Apply our TFT_eSPI display configuration
         run: |
