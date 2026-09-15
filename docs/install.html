@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111318">
+<title>Install MADD PEMF</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<style>
+  :root {
+    --bg: #111318;
+    --card: #1b1e26;
+    --border: #2a2e3a;
+    --accent: #5eb0ff;
+    --accent-dim: #2f5f85;
+    --text: #eef2f8;
+    --text-dim: #9aa4b5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 32px 28px 24px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 1.5rem;
+    letter-spacing: 0.02em;
+  }
+  .subtitle {
+    margin: 0 0 22px;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+  ol {
+    text-align: left;
+    margin: 0 0 22px;
+    padding-left: 20px;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  ol li::marker { color: var(--accent); }
+  esp-web-install-button {
+    display: block;
+    margin: 4px 0 10px;
+  }
+  esp-web-install-button::part(activate-button) {
+    background: var(--accent);
+    color: #06131f;
+    font-weight: 600;
+    font-size: 1rem;
+    padding: 14px 0;
+    border-radius: 12px;
+    width: 100%;
+  }
+  .version {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    margin-bottom: 18px;
+  }
+  .note {
+    background: rgba(94, 176, 255, 0.08);
+    border: 1px solid var(--accent-dim);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    text-align: left;
+    margin-bottom: 18px;
+  }
+  footer {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>MADD PEMF</h1>
+    <p class="subtitle">Web firmware installer</p>
+
+    <ol>
+      <li>Plug your ESP32 board into a USB port on this computer.</li>
+      <li>Use <strong>Chrome</strong> or <strong>Edge</strong> (Web Serial required).</li>
+      <li>Click Install below, then pick the correct serial port.</li>
+      <li>Don't unplug the board while it's flashing.</li>
+    </ol>
+
+    <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+    <div class="version">Installs the latest automatically-built firmware</div>
+
+    <div class="note">
+      Note: this erases all existing data on the board and replaces it with
+      the current build.
+    </div>
+
+    <footer>
+      Powered by <a href="https://esphome.github.io/esp-web-tools/" target="_blank">ESP Web Tools</a>
+    </footer>
+  </div>
+</body>
+</html>
