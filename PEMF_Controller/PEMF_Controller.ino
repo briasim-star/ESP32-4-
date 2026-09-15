@@ -312,6 +312,8 @@ void drawButtonFast(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool
   drawFittedLabel(r, label, FONT_SM, fillColor);
 }
 
+Rect btnHome = {220, 16, 84, 36};
+
 // Small, consistently-placed Home button, top-right corner of every
 // non-home screen. Always returns to the Category screen.
 // Truncates left-aligned text with ".." if it would exceed maxW - the
@@ -968,6 +970,31 @@ void handleLogTouch(int x, int y) {
 // their phone (or types the URL) to reach the install page, where they
 // can also grab a previous firmware version if a new one causes problems.
 // ---------------------------------------------------------------------
+struct UpdateQrDrawCtx {
+  int screenWidth;
+  int topY;
+  int scale;
+  int qrPixels;
+};
+
+void drawUpdateQrCode(esp_qrcode_handle_t qrcode, void* userData) {
+  UpdateQrDrawCtx* ctx = (UpdateQrDrawCtx*)userData;
+  int qrSize = esp_qrcode_get_size(qrcode);
+  ctx->qrPixels = qrSize * ctx->scale;
+  int qx = (ctx->screenWidth - ctx->qrPixels) / 2;
+  int qy = ctx->topY;
+
+  // White quiet-zone margin around the code - required for reliable scanning.
+  tft.fillRect(qx - 10, qy - 10, ctx->qrPixels + 20, ctx->qrPixels + 20, TFT_WHITE);
+  for (int y = 0; y < qrSize; y++) {
+    for (int x = 0; x < qrSize; x++) {
+      if (esp_qrcode_get_module(qrcode, x, y)) {
+        tft.fillRect(qx + x * ctx->scale, qy + y * ctx->scale, ctx->scale, ctx->scale, TFT_BLACK);
+      }
+    }
+  }
+}
+
 void drawUpdateScreen() {
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_LG);
@@ -984,28 +1011,19 @@ void drawUpdateScreen() {
   tft.drawString("Scan with your phone to check for", 20, 74);
   tft.drawString("updates (or install a previous version):", 20, 92);
 
-  // QR code - version 5 gives plenty of headroom for a ~55-char URL at
-  // low error correction (up to ~106 bytes), so it stays reliably scannable.
-  QRCode qrcode;
-  uint8_t qrBuf[qrcode_getBufferSize(5)];
-  qrcode_initText(&qrcode, qrBuf, 5, ECC_LOW, UPDATE_URL);
-
-  int scale = 5;
-  int qrPixels = qrcode.size * scale;
-  int qx = (320 - qrPixels) / 2;
-  int qy = 118;
-
-  // White quiet-zone margin around the code - required for reliable scanning.
-  tft.fillRect(qx - 10, qy - 10, qrPixels + 20, qrPixels + 20, TFT_WHITE);
-  for (int y = 0; y < qrcode.size; y++) {
-    for (int x = 0; x < qrcode.size; x++) {
-      if (qrcode_getModule(&qrcode, x, y)) {
-        tft.fillRect(qx + x * scale, qy + y * scale, scale, scale, TFT_BLACK);
-      }
-    }
+  // Generate and draw QR code with the ESP32 qrcode.h API available in CI.
+  UpdateQrDrawCtx qrCtx = {320, 118, 5, 0};
+  esp_qrcode_config_t qrCfg = ESP_QRCODE_CONFIG_DEFAULT();
+  qrCfg.display_func_with_cb = drawUpdateQrCode;
+  qrCfg.max_qrcode_version = 5;
+  qrCfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
+  qrCfg.user_data = &qrCtx;
+  if (esp_qrcode_generate(&qrCfg, UPDATE_URL) != ESP_OK) {
+    tft.setTextColor(COLOR_WARN, COLOR_BG);
+    tft.drawString("Unable to render QR code", 20, 128);
   }
 
-  int textY = qy + qrPixels + 26;
+  int textY = qrCtx.topY + (qrCtx.qrPixels > 0 ? qrCtx.qrPixels : 185) + 26;
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
