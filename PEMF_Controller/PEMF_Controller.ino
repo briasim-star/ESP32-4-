@@ -1023,8 +1023,9 @@ void drawUpdateScreen() {
     tft.drawString("Unable to render QR code", 20, 128);
   }
 
-  int fallbackQrPixels = (21 + (qrCfg.max_qrcode_version - 1) * 4) * qrCtx.scale;
-  int textY = qrCtx.topY + (qrCtx.qrPixels > 0 ? qrCtx.qrPixels : fallbackQrPixels) + 26;
+  const int intendedQrModules = 37; // version 5 layout target for this screen
+  int intendedQrPixels = intendedQrModules * qrCtx.scale;
+  int textY = qrCtx.topY + (qrCtx.qrPixels > 0 ? qrCtx.qrPixels : intendedQrPixels) + 26;
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
