@@ -138,6 +138,42 @@ static bool soundscapeStopping = false; // true while fading out, file still ope
 static uint32_t soundscapeDataStart = 0; // byte offset where PCM data begins
 static uint32_t soundscapeDataSize = 0;  // size of the PCM data chunk, in bytes
 
+// Ring buffer, pre-fetched from SD during loop() (via btaudio_update(),
+// non-time-critical) so get_sound_data() - a callback invoked directly
+// by the Bluetooth stack, which must return quickly and predictably -
+// never touches the SD card itself. A real, confirmed periodic stutter
+// was traced to that callback doing a potentially-slow SD read inline;
+// this fixes it by only ever reading from fast RAM in that callback.
+// Single-producer (loop()) / single-consumer (the BT task calling
+// get_sound_data()) - safe without a lock as long as only one side ever
+// writes each index variable.
+static const int SND_RING_SIZE = 16384; // ~90ms of stereo 16-bit audio at 44.1kHz - enough to absorb a slow SD read without an audible gap
+static uint8_t sndRingBuf[SND_RING_SIZE];
+static volatile int sndRingWritePos = 0;
+static volatile int sndRingReadPos = 0;
+static volatile int sndRingFilled = 0;
+
+static void refillSoundscapeRing() {
+  if (!soundscapePlaying && !soundscapeStopping) return;
+  int freeSpace = SND_RING_SIZE - sndRingFilled;
+  if (freeSpace < 512) return; // not worth a read yet
+  int toRead = freeSpace;
+  int spaceToEnd = SND_RING_SIZE - sndRingWritePos;
+  if (toRead > spaceToEnd) toRead = spaceToEnd; // don't wrap mid-read - next call picks up the rest
+
+  int bytesRead = soundscapeFile.read(sndRingBuf + sndRingWritePos, toRead);
+  if (bytesRead < toRead) {
+    // Hit end of file - loop back to the start of the PCM data and keep
+    // filling, so the loop point has no gap.
+    soundscapeFile.seek(soundscapeDataStart);
+    int remaining = toRead - bytesRead;
+    int more = soundscapeFile.read(sndRingBuf + sndRingWritePos + bytesRead, remaining);
+    bytesRead += more;
+  }
+  sndRingWritePos = (sndRingWritePos + bytesRead) % SND_RING_SIZE;
+  sndRingFilled += bytesRead;
+}
+
 bool btaudio_startSoundscape(const char* path) {
   if (soundscapePlaying) btaudio_stopSoundscape();
   soundscapeFile = SD.open(path, FILE_READ);
@@ -168,7 +204,14 @@ bool btaudio_startSoundscape(const char* path) {
     soundscapeFile.close();
     return false;
   }
+  sndRingWritePos = 0;
+  sndRingReadPos = 0;
+  sndRingFilled = 0;
   soundscapePlaying = true;
+  // Fill the ring once up front, right here, before playback actually
+  // starts - so the very first callback already has data ready rather
+  // than starting from empty and needing a few loop() cycles to catch up.
+  for (int i = 0; i < 4 && sndRingFilled < SND_RING_SIZE; i++) refillSoundscapeRing();
   return true;
 }
 
@@ -191,14 +234,27 @@ int32_t get_sound_data(Frame* data, int32_t frameCount) {
   if (soundscapePlaying || soundscapeStopping) {
     static const int FRAME_SIZE_BYTES = sizeof(int16_t) * 2; // 2 channels
     int32_t bytesNeeded = frameCount * FRAME_SIZE_BYTES;
-    int32_t bytesRead = soundscapeFile.read((uint8_t*)data, bytesNeeded);
-    if (bytesRead < bytesNeeded) {
-      // Hit end of file mid-buffer - loop back to the start of the PCM
-      // data and fill the remainder, so the loop point has no gap.
-      soundscapeFile.seek(soundscapeDataStart);
-      int32_t remaining = bytesNeeded - bytesRead;
-      soundscapeFile.read(((uint8_t*)data) + bytesRead, remaining);
+
+    if (sndRingFilled < bytesNeeded) {
+      // Genuine underrun - the ring buffer didn't get refilled in time
+      // (loop() got busy with something else). Play silence rather than
+      // blocking here on a slow SD read - a brief gap is far better
+      // than stalling the whole Bluetooth audio pipeline, which is
+      // exactly what caused the periodic stutter this replaces.
+      for (int32_t i = 0; i < frameCount; i++) { data[i].channel1 = 0; data[i].channel2 = 0; }
+      return frameCount;
     }
+
+    uint8_t* dst = (uint8_t*)data;
+    int firstPart = SND_RING_SIZE - sndRingReadPos;
+    if (firstPart > bytesNeeded) firstPart = bytesNeeded;
+    memcpy(dst, sndRingBuf + sndRingReadPos, firstPart);
+    if (firstPart < bytesNeeded) {
+      memcpy(dst + firstPart, sndRingBuf, bytesNeeded - firstPart);
+    }
+    sndRingReadPos = (sndRingReadPos + bytesNeeded) % SND_RING_SIZE;
+    sndRingFilled -= bytesNeeded;
+
     for (int32_t i = 0; i < frameCount; i++) {
       float target = soundscapePlaying ? 1.0f : 0.0f;
       if (fadeGain < target) {
@@ -336,6 +392,10 @@ void btaudio_update() {
     a2dp_source.set_volume(100); // ~80% of the library's 0-127 range
     volumeSetForThisConnection = true;
   }
+  // Keeps the soundscape ring buffer topped up from SD - see the note
+  // by SND_RING_SIZE above for why this can't happen inside the
+  // get_sound_data() callback itself.
+  refillSoundscapeRing();
 }
 
 bool btaudio_isEnabled() { return enabled; }
