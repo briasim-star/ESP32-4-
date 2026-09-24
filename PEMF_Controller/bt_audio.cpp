@@ -1,483 +1,502 @@
 #include "bt_audio.h"
+#include "pins.h"
+#include "sd_media.h"
 #include "BluetoothA2DPSource.h"
-#include <math.h>
+#include <driver/i2s.h>
+#include <driver/dac.h>
+#include <driver/rtc_io.h>
 #include <SD.h>
+#include <math.h>
 
-// ----------------------------------------------------------------------
-// NOTE: The exact callback signature in the ESP32-A2DP library (by
-// pschatzmann) has changed slightly across versions - it's always some
-// form of "int32_t callback(Frame* data, int32_t frameCount)" where Frame
-// has two int16_t channels, but the type name has been "Frame" or
-// "Channels" depending on version. If this doesn't compile, open
-// File > Examples > ESP32-A2DP > bt_music_sender_sinus in the Arduino IDE
-// after installing the library and match this file's callback signature
-// to whatever that example uses - it's a two-line fix.
-// ----------------------------------------------------------------------
+// ============================================================================
+// Unified audio engine - see bt_audio.h for the overview.
 //
-// AUDIO TECHNIQUE SELECTION:
-// This picks its audio-entrainment technique based on the target PEMF
-// frequency, since research on binaural beats consistently finds that
-// true left/right binaural perception breaks down once the frequency
-// difference between ears exceeds roughly 30 Hz (Licklider et al. 1950;
-// Perrott & Nelson) - above that, listeners just hear two separate tones
-// rather than a beat. Worth noting: even within its effective range,
-// controlled studies on binaural beats' actual physiological effects are
-// mixed (e.g. a 2017 Frontiers study found no significant EEG change) -
-// this is offered as an audio companion to the session, not a verified
-// clinical effect.
-//
-//   - target <= 30 Hz  : true binaural - carrier tone in the left ear,
-//                        carrier+target in the right ear. The two tones
-//                        differ only in the right channel's frequency.
-//   - 30-100 Hz        : isochronic-style - a single audible carrier tone,
-//                        identical in both ears, amplitude-modulated
-//                        (pulsed) at the target rate.
-//   - target >= 100 Hz : direct tone - the target frequency itself is
-//                        already audible, so it's played straight,
-//                        identical in both ears.
-// ----------------------------------------------------------------------
+// Data flow:
+//   audioTask (own FreeRTOS task, core 1, above loop() priority)
+//     - opens/parses the chosen soundscape WAV and keeps a RAM ring buffer
+//       topped up from the SD card
+//     - when OUTPUT = speaker: renders audio and pushes it to the I2S DMA
+//       (i2s_write blocks until there is room, so it is naturally paced)
+//   Bluetooth A2DP callback (runs in the BT stack's task)
+//     - when OUTPUT = bluetooth: renders audio straight into the BT buffer
+//   renderFrames() is the single place tone/soundscape audio is produced,
+//   so both outputs always sound the same.
+// ============================================================================
 
-static BluetoothA2DPSource a2dp_source;
 static const uint32_t SAMPLE_RATE = 44100;
+static const i2s_port_t SPK_I2S_PORT = I2S_NUM_0; // built-in DAC only works on I2S0
+static const float TWO_PI_F = 6.28318530718f;
 
-static volatile bool enabled = false;
-static volatile float targetFreqHz = 0;
-static volatile float g_volumeFrac = 1.0f; // 0.0 - 1.0, set via btaudio_setVolume()
+struct StereoFrame { int16_t l; int16_t r; };
+static_assert(sizeof(StereoFrame) == sizeof(Frame), "Frame layout must be two int16 channels");
 
-static const float BINAURAL_CARRIER_HZ   = 200.0f; // left-ear tone for binaural mode
-static const float BINAURAL_MAX_DIFF_HZ  = 30.0f;  // research-supported ceiling for beat perception
-static const float ISOCHRONIC_CARRIER_HZ = 200.0f; // audible carrier for the AM fallback
-static const float AUDIBLE_THRESHOLD_HZ  = 100.0f;
-// Ceiling on how high the LITERAL audible tone is ever allowed to go, kept
-// completely independent of the coil's own frequency. The coil can safely
-// run up to 20kHz (e.g. the Multi-Frequency Sequence's 10,000Hz step), but
-// a raw 10kHz *audio* tone would be genuinely harsh/piercing to listen to,
-// not just "technically" in the audible range. Above this ceiling the
-// audio simply holds at the ceiling tone instead of climbing with the coil.
-static const float DIRECT_TONE_MAX_HZ    = 1000.0f;
+// ---------------------------------------------------------------------------
+// Shared state (written by loop(), read by the audio task / BT callback)
+// ---------------------------------------------------------------------------
+static volatile AudioOutput g_output = AUDIO_OUT_SPEAKER;
+static volatile AudioSource g_source = AUDIO_SRC_OFF;
+static volatile float g_toneHz = 10.0f;
+static volatile float g_volume = 0.6f;
+static volatile bool g_headphones = false;
 
-// Fade-in/fade-out gain, applied on top of any audio source (tone or
-// soundscape) - a sudden jump from silence to full amplitude, or back,
-// is exactly what causes an audible click/pop when audio is turned on
-// or off. This ramps smoothly over ~30ms instead, sample by sample.
-// Confirmed by real report: an audible, startling click when toggling
-// BT audio on/off.
-static float fadeGain = 0.0f;
-static const float FADE_STEP = 1.0f / (SAMPLE_RATE * 0.03f); // ~30ms fade
+static unsigned long g_underruns = 0;
+static bool g_speakerReady = false;
 
-// ----------------------------------------------------------------------
-// Precomputed sine lookup table (with linear interpolation), used instead
-// of calling sin()/sinf() per audio sample. This callback runs inside the
-// Bluetooth stack's own task at 44.1kHz - a slow callback there was
-// starving other tasks badly enough to trip the watchdog and crash the
-// device (confirmed via serial log: "Task watchdog... CPU 0: BTC_TASK").
-// Also using float throughout rather than double, since the ESP32's FPU
-// is single-precision only - double math silently falls back to much
-// slower software emulation.
-// ----------------------------------------------------------------------
-static const int SIN_TABLE_SIZE = 256; // power of 2, for cheap wraparound via bitmask
-static float sinTable[SIN_TABLE_SIZE];
-static bool sinTableReady = false;
+// ---------------------------------------------------------------------------
+// Tone generation (same technique selection as before - this part already
+// sounded right):
+//   <= 30 Hz : binaural beat on headphones, isochronic pulse otherwise
+//   30-100 Hz: isochronic pulse on a 200 Hz carrier
+//   >= 100 Hz: the frequency itself as a sine, capped at 1 kHz
+// ---------------------------------------------------------------------------
+static const float CARRIER_HZ = 200.0f;
+static const float BINAURAL_MAX_HZ = 30.0f;
+static const float AUDIBLE_HZ = 100.0f;
+static const float DIRECT_MAX_HZ = 1000.0f;
+static const float TONE_LEVEL = 0.55f; // of full scale, before volume
 
-static void ensureSinTable() {
-  if (sinTableReady) return;
-  for (int i = 0; i < SIN_TABLE_SIZE; i++) {
-    sinTable[i] = sinf(2.0f * (float)M_PI * i / SIN_TABLE_SIZE);
-  }
-  sinTableReady = true;
-}
+static const int SIN_N = 256;
+static float sinTable[SIN_N];
 
-// phase is in radians, 0..2*PI (wraps). Table lookup + linear interpolation.
 static inline float fastSin(float phase) {
-  float normalized = phase * ((float)SIN_TABLE_SIZE / (2.0f * (float)M_PI));
-  int idx0 = (int)normalized;
-  float frac = normalized - (float)idx0;
-  idx0 &= (SIN_TABLE_SIZE - 1);
-  int idx1 = (idx0 + 1) & (SIN_TABLE_SIZE - 1);
-  return sinTable[idx0] + frac * (sinTable[idx1] - sinTable[idx0]);
+  float x = phase * (SIN_N / TWO_PI_F);
+  int i0 = (int)x;
+  float frac = x - i0;
+  i0 &= (SIN_N - 1);
+  int i1 = (i0 + 1) & (SIN_N - 1);
+  return sinTable[i0] + frac * (sinTable[i1] - sinTable[i0]);
 }
 
-static float leftPhase = 0;
-static float rightPhase = 0;
-static float envelopePhase = 0;
-static const float TWO_PI_F = 2.0f * (float)M_PI;
+static float phL = 0, phR = 0, phEnv = 0;
 
-// True binaural beating needs two ears each hearing a genuinely
-// different tone - a single speaker (Bluetooth or wired) mixes both
-// channels together in the air before reaching the ears, which defeats
-// the effect entirely. There's no reliable automatic way to tell if a
-// paired Bluetooth device is headphones or a speaker, so this is set
-// explicitly by the user (see btaudio_setHeadphonesMode()) rather than
-// guessed from the device name. Defaults to false (speaker) - the more
-// conservative assumption, since incorrectly assuming headphones would
-// send stereo-separated content that gets muddled on a speaker.
-static bool headphonesMode = false;
-
-void btaudio_setHeadphonesMode(bool on) { headphonesMode = on; }
-bool btaudio_isHeadphonesMode() { return headphonesMode; }
-
-enum AudioMode { MODE_BINAURAL, MODE_ISOCHRONIC, MODE_DIRECT };
-
-static AudioMode currentAudioMode(float f) {
-  if (f <= BINAURAL_MAX_DIFF_HZ) return headphonesMode ? MODE_BINAURAL : MODE_ISOCHRONIC;
-  if (f < AUDIBLE_THRESHOLD_HZ) return MODE_ISOCHRONIC;
-  return MODE_DIRECT;
+static inline void advance(float& ph, float hz) {
+  ph += TWO_PI_F * hz / SAMPLE_RATE;
+  if (ph >= TWO_PI_F) ph -= TWO_PI_F;
 }
 
-// ---------------------------------------------------------------------
-// Soundscapes - streams raw PCM directly from an SD-card WAV file into
-// the same audio callback used for tone generation. Since our WAV files
-// are already prepared at 44.1kHz/16-bit/stereo (matching this pipeline
-// exactly), this is a direct byte-for-byte read into the Frame buffer -
-// no decoding or resampling needed. Pattern verified against a real,
-// community-confirmed example of exactly this SD+A2DP combination.
-// ---------------------------------------------------------------------
-static fs::File soundscapeFile;
-static bool soundscapePlaying = false;
-static bool soundscapeStopping = false; // true while fading out, file still open
-static uint32_t soundscapeDataStart = 0; // byte offset where PCM data begins
-static uint32_t soundscapeDataSize = 0;  // size of the PCM data chunk, in bytes
-
-// Ring buffer, pre-fetched from SD during loop() (via btaudio_update(),
-// non-time-critical) so get_sound_data() - a callback invoked directly
-// by the Bluetooth stack, which must return quickly and predictably -
-// never touches the SD card itself. A real, confirmed periodic stutter
-// was traced to that callback doing a potentially-slow SD read inline;
-// this fixes it by only ever reading from fast RAM in that callback.
-// Single-producer (loop()) / single-consumer (the BT task calling
-// get_sound_data()) - safe without a lock as long as only one side ever
-// writes each index variable.
-static const int SND_RING_SIZE = 16384; // ~90ms of stereo 16-bit audio at 44.1kHz - enough to absorb a slow SD read without an audible gap
-static uint8_t sndRingBuf[SND_RING_SIZE];
-static volatile int sndRingWritePos = 0;
-static volatile int sndRingReadPos = 0;
-static volatile int sndRingFilled = 0;
-
-static void refillSoundscapeRing() {
-  if (!soundscapePlaying && !soundscapeStopping) return;
-  int freeSpace = SND_RING_SIZE - sndRingFilled;
-  if (freeSpace < 512) return; // not worth a read yet
-  int toRead = freeSpace;
-  int spaceToEnd = SND_RING_SIZE - sndRingWritePos;
-  if (toRead > spaceToEnd) toRead = spaceToEnd; // don't wrap mid-read - next call picks up the rest
-
-  int bytesRead = soundscapeFile.read(sndRingBuf + sndRingWritePos, toRead);
-  if (bytesRead < toRead) {
-    // Hit end of file - loop back to the start of the PCM data and keep
-    // filling, so the loop point has no gap.
-    soundscapeFile.seek(soundscapeDataStart);
-    int remaining = toRead - bytesRead;
-    int more = soundscapeFile.read(sndRingBuf + sndRingWritePos + bytesRead, remaining);
-    bytesRead += more;
-  }
-  sndRingWritePos = (sndRingWritePos + bytesRead) % SND_RING_SIZE;
-  sndRingFilled += bytesRead;
-}
-
-bool btaudio_startSoundscape(const char* path) {
-  if (soundscapePlaying) btaudio_stopSoundscape();
-  soundscapeFile = SD.open(path, FILE_READ);
-  if (!soundscapeFile) return false;
-
-  // Walk the WAV's chunks to find "data" properly, rather than assuming
-  // a fixed 44-byte offset - some encoders (including ffmpeg, which made
-  // these files) can add extra chunks before it.
-  soundscapeFile.seek(12); // past "RIFF" + size(4) + "WAVE"
-  soundscapeDataStart = 0;
-  soundscapeDataSize = 0;
-  while (soundscapeFile.available()) {
-    char chunkId[4];
-    if (soundscapeFile.read((uint8_t*)chunkId, 4) != 4) break;
-    uint8_t sizeBytes[4];
-    if (soundscapeFile.read(sizeBytes, 4) != 4) break;
-    uint32_t chunkSize = sizeBytes[0] | (sizeBytes[1] << 8) | (sizeBytes[2] << 16) | (sizeBytes[3] << 24);
-
-    if (memcmp(chunkId, "data", 4) == 0) {
-      soundscapeDataStart = soundscapeFile.position();
-      soundscapeDataSize = chunkSize;
-      break;
+static void renderTone(StereoFrame* out, int n) {
+  float f = g_toneHz;
+  if (f <= 0) f = 10.0f;
+  bool binaural = (f <= BINAURAL_MAX_HZ) && g_headphones && g_output == AUDIO_OUT_BLUETOOTH;
+  const float amp = 32767.0f * TONE_LEVEL;
+  for (int i = 0; i < n; i++) {
+    float l, r;
+    if (binaural) {
+      l = fastSin(phL);
+      r = fastSin(phR);
+      advance(phL, CARRIER_HZ);
+      advance(phR, CARRIER_HZ + f);
+    } else if (f < AUDIBLE_HZ) {
+      float env = 0.5f + 0.5f * fastSin(phEnv);
+      l = r = fastSin(phL) * env;
+      advance(phL, CARRIER_HZ);
+      advance(phEnv, f);
+    } else {
+      l = r = fastSin(phL);
+      advance(phL, f > DIRECT_MAX_HZ ? DIRECT_MAX_HZ : f);
     }
-    soundscapeFile.seek(soundscapeFile.position() + chunkSize);
+    out[i].l = (int16_t)(l * amp);
+    out[i].r = (int16_t)(r * amp);
   }
+}
 
-  if (soundscapeDataSize == 0) {
-    soundscapeFile.close();
+// ---------------------------------------------------------------------------
+// Soundscape ring buffer (stereo frames). Producer = audioTask only.
+// Consumer = whichever output is active. Index updates are guarded by a
+// spinlock; a generation counter makes a file switch safe mid-read.
+// ---------------------------------------------------------------------------
+static const int RING_FRAMES = 6144; // ~140 ms
+static StereoFrame ring[RING_FRAMES];
+static int ringWritePos = 0, ringReadPos = 0, ringFilled = 0;
+static uint32_t ringGen = 0;
+static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
+
+static int ringPull(StereoFrame* out, int n) {
+  portENTER_CRITICAL(&ringMux);
+  int filled = ringFilled, rp = ringReadPos;
+  uint32_t gen = ringGen;
+  portEXIT_CRITICAL(&ringMux);
+
+  int take = n < filled ? n : filled;
+  int first = RING_FRAMES - rp;
+  if (first > take) first = take;
+  memcpy(out, ring + rp, first * sizeof(StereoFrame));
+  if (take > first) memcpy(out + first, ring, (take - first) * sizeof(StereoFrame));
+
+  portENTER_CRITICAL(&ringMux);
+  if (gen == ringGen) {
+    ringReadPos = (rp + take) % RING_FRAMES;
+    ringFilled -= take;
+  }
+  portEXIT_CRITICAL(&ringMux);
+
+  if (take < n) {
+    memset(out + take, 0, (n - take) * sizeof(StereoFrame));
+    g_underruns++;
+  }
+  return take;
+}
+
+static void ringReset() {
+  portENTER_CRITICAL(&ringMux);
+  ringWritePos = ringReadPos = ringFilled = 0;
+  ringGen++;
+  portEXIT_CRITICAL(&ringMux);
+}
+
+// ---------------------------------------------------------------------------
+// WAV file handling (audioTask only)
+// ---------------------------------------------------------------------------
+static fs::File sndFile;
+static uint32_t sndDataStart = 0, sndDataSize = 0, sndRemaining = 0;
+static uint16_t sndChannels = 2;
+
+static char currentPath[64] = "";
+static char pendingPath[64] = "";
+static volatile bool pendingOpen = false;
+static portMUX_TYPE pathMux = portMUX_INITIALIZER_UNLOCKED;
+
+static uint32_t rd32(const uint8_t* b) { return b[0] | (b[1] << 8) | (b[2] << 16) | ((uint32_t)b[3] << 24); }
+
+static bool openWav(const char* path) {
+  if (sndFile) sndFile.close();
+  sndDataSize = 0;
+  if (!path || !path[0] || !sdmedia_isAvailable()) return false;
+  sndFile = SD.open(path, FILE_READ);
+  if (!sndFile) return false;
+
+  uint8_t hdr[12];
+  if (sndFile.read(hdr, 12) != 12 || memcmp(hdr, "RIFF", 4) || memcmp(hdr + 8, "WAVE", 4)) { sndFile.close(); return false; }
+  uint16_t bits = 16;
+  sndChannels = 2;
+  while (sndFile.available()) {
+    uint8_t ch[8];
+    if (sndFile.read(ch, 8) != 8) break;
+    uint32_t size = rd32(ch + 4);
+    if (!memcmp(ch, "fmt ", 4)) {
+      uint8_t fmt[16];
+      if (sndFile.read(fmt, 16) != 16) break;
+      sndChannels = fmt[2] | (fmt[3] << 8);
+      bits = fmt[14] | (fmt[15] << 8);
+      if (size > 16) sndFile.seek(sndFile.position() + (size - 16) + (size & 1));
+    } else if (!memcmp(ch, "data", 4)) {
+      sndDataStart = sndFile.position();
+      sndDataSize = size;
+      break;
+    } else {
+      sndFile.seek(sndFile.position() + size + (size & 1));
+    }
+  }
+  if (sndDataSize == 0 || bits != 16 || (sndChannels != 1 && sndChannels != 2)) {
+    sndFile.close();
+    sndDataSize = 0;
     return false;
   }
-  sndRingWritePos = 0;
-  sndRingReadPos = 0;
-  sndRingFilled = 0;
-  soundscapePlaying = true;
-  // Fill the ring once up front, right here, before playback actually
-  // starts - so the very first callback already has data ready rather
-  // than starting from empty and needing a few loop() cycles to catch up.
-  for (int i = 0; i < 4 && sndRingFilled < SND_RING_SIZE; i++) refillSoundscapeRing();
+  sndRemaining = sndDataSize;
   return true;
 }
 
-void btaudio_stopSoundscape() {
-  // Defer actually closing the file until the fade-out completes (see
-  // get_sound_data()) - closing it immediately would cut the audio off
-  // abruptly, causing the same kind of click this whole fade system
-  // exists to prevent.
-  if (soundscapePlaying) soundscapeStopping = true;
-  soundscapePlaying = false;
+static uint8_t readBuf[4096];
+
+static void refillRing() {
+  if (!sndFile || sndDataSize == 0) return;
+  const int bpf = sndChannels * 2;
+  for (int guard = 0; guard < 8; guard++) {
+    portENTER_CRITICAL(&ringMux);
+    int freeFrames = RING_FRAMES - ringFilled;
+    int wp = ringWritePos;
+    uint32_t gen = ringGen;
+    portEXIT_CRITICAL(&ringMux);
+    if (freeFrames < 512) return;
+
+    int chunk = freeFrames;
+    if (chunk > RING_FRAMES - wp) chunk = RING_FRAMES - wp;
+    if (chunk > (int)sizeof(readBuf) / bpf) chunk = sizeof(readBuf) / bpf;
+    if (sndRemaining < (uint32_t)bpf) { // loop the file seamlessly
+      sndFile.seek(sndDataStart);
+      sndRemaining = sndDataSize;
+    }
+    if ((uint32_t)(chunk * bpf) > sndRemaining) chunk = sndRemaining / bpf;
+
+    sdmedia_lock();
+    int got = sndFile.read(readBuf, chunk * bpf) / bpf;
+    sdmedia_unlock();
+    if (got <= 0) { sndFile.seek(sndDataStart); sndRemaining = sndDataSize; return; }
+    sndRemaining -= got * bpf;
+
+    const int16_t* s = (const int16_t*)readBuf;
+    StereoFrame* d = ring + wp;
+    if (sndChannels == 2) {
+      memcpy(d, s, got * sizeof(StereoFrame));
+    } else {
+      for (int i = 0; i < got; i++) { d[i].l = d[i].r = s[i]; }
+    }
+
+    portENTER_CRITICAL(&ringMux);
+    if (gen == ringGen) {
+      ringWritePos = (wp + got) % RING_FRAMES;
+      ringFilled += got;
+    }
+    portEXIT_CRITICAL(&ringMux);
+  }
 }
 
-bool btaudio_isSoundscapePlaying() { return soundscapePlaying; }
+static void serviceSoundscapeFile() {
+  if (pendingOpen) {
+    char path[64];
+    portENTER_CRITICAL(&pathMux);
+    strncpy(path, pendingPath, sizeof(path));
+    pendingOpen = false;
+    portEXIT_CRITICAL(&pathMux);
+    ringReset();
+    sdmedia_lock();
+    openWav(path);
+    sdmedia_unlock();
+  }
+  refillRing();
+}
 
-// Generates one audio frame using whichever technique fits the current
-// target frequency - see the technique-selection note above.
-int32_t get_sound_data(Frame* data, int32_t frameCount) {
-  bool wantAudio = soundscapePlaying || (enabled && targetFreqHz > 0);
+// ---------------------------------------------------------------------------
+// The one renderer. Handles smooth fades whenever the source changes
+// (Off <-> Tone <-> Soundscape) so there are no clicks.
+// ---------------------------------------------------------------------------
+static AudioSource renderingSource = AUDIO_SRC_OFF;
+static float fadeGain = 0.0f;
+static const float FADE_STEP = 1.0f / (SAMPLE_RATE * 0.04f); // ~40 ms
 
-  if (soundscapePlaying || soundscapeStopping) {
-    static const int FRAME_SIZE_BYTES = sizeof(int16_t) * 2; // 2 channels
-    int32_t bytesNeeded = frameCount * FRAME_SIZE_BYTES;
+static void renderFrames(StereoFrame* out, int n) {
+  AudioSource want = g_source;
 
-    if (sndRingFilled < bytesNeeded) {
-      // Genuine underrun - the ring buffer didn't get refilled in time
-      // (loop() got busy with something else). Play silence rather than
-      // blocking here on a slow SD read - a brief gap is far better
-      // than stalling the whole Bluetooth audio pipeline, which is
-      // exactly what caused the periodic stutter this replaces.
-      for (int32_t i = 0; i < frameCount; i++) { data[i].channel1 = 0; data[i].channel2 = 0; }
-      return frameCount;
-    }
+  if (renderingSource == AUDIO_SRC_SOUNDSCAPE) ringPull(out, n);
+  else if (renderingSource == AUDIO_SRC_TONE) renderTone(out, n);
+  else memset(out, 0, n * sizeof(StereoFrame));
 
-    uint8_t* dst = (uint8_t*)data;
-    int firstPart = SND_RING_SIZE - sndRingReadPos;
-    if (firstPart > bytesNeeded) firstPart = bytesNeeded;
-    memcpy(dst, sndRingBuf + sndRingReadPos, firstPart);
-    if (firstPart < bytesNeeded) {
-      memcpy(dst + firstPart, sndRingBuf, bytesNeeded - firstPart);
-    }
-    sndRingReadPos = (sndRingReadPos + bytesNeeded) % SND_RING_SIZE;
-    sndRingFilled -= bytesNeeded;
+  float vol = g_volume;
+  bool switching = (want != renderingSource);
+  for (int i = 0; i < n; i++) {
+    if (switching) { fadeGain -= FADE_STEP; if (fadeGain < 0) fadeGain = 0; }
+    else if (fadeGain < 1.0f) { fadeGain += FADE_STEP; if (fadeGain > 1.0f) fadeGain = 1.0f; }
+    float g = fadeGain * vol;
+    out[i].l = (int16_t)(out[i].l * g);
+    out[i].r = (int16_t)(out[i].r * g);
+  }
+  if (switching && fadeGain <= 0.0f) {
+    renderingSource = want;
+    phL = phR = phEnv = 0;
+  }
+}
 
-    for (int32_t i = 0; i < frameCount; i++) {
-      float target = soundscapePlaying ? 1.0f : 0.0f;
-      if (fadeGain < target) {
-        fadeGain += FADE_STEP;
-        if (fadeGain > target) fadeGain = target;
-      } else if (fadeGain > target) {
-        fadeGain -= FADE_STEP;
-        if (fadeGain < target) fadeGain = target;
-      }
-      data[i].channel1 = (int16_t)(data[i].channel1 * g_volumeFrac * fadeGain);
-      data[i].channel2 = (int16_t)(data[i].channel2 * g_volumeFrac * fadeGain);
-    }
-    if (soundscapeStopping && fadeGain <= 0.0f) {
-      soundscapeFile.close();
-      soundscapeStopping = false;
-    }
-    return frameCount;
+// ---------------------------------------------------------------------------
+// Onboard speaker (I2S -> built-in DAC2 on IO26 -> onboard amp)
+// ---------------------------------------------------------------------------
+static void speakerInit() {
+  pinMode(AUDIO_ENABLE, OUTPUT);
+  digitalWrite(AUDIO_ENABLE, HIGH); // amp off until there is sound
+
+  i2s_config_t cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
+  cfg.sample_rate = SAMPLE_RATE;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB; // correct format for the built-in DAC
+  cfg.intr_alloc_flags = 0;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 512;
+  cfg.use_apll = false;
+  cfg.tx_desc_auto_clear = false;
+
+  if (i2s_driver_install(SPK_I2S_PORT, &cfg, 0, NULL) != ESP_OK) return;
+
+  // IMPORTANT: do NOT call i2s_set_pin(port, NULL) - that enables BOTH DAC
+  // pins, and IO25 is the coil's PWM pin. Enable only DAC2 (IO26, speaker).
+  i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN);
+  dac_output_disable(DAC_CHANNEL_1);
+  rtc_gpio_deinit(GPIO_NUM_25);        // hand IO25 back to the digital matrix for LEDC
+  i2s_zero_dma_buffer(SPK_I2S_PORT);
+  g_speakerReady = true;
+}
+
+static uint16_t dacBuf[256 * 2];
+static StereoFrame spkFrames[256];
+
+static void speakerPump() {
+  static unsigned long silentSince = 0;
+  static bool ampOn = false;
+
+  renderFrames(spkFrames, 256);
+
+  bool audible = (renderingSource != AUDIO_SRC_OFF) || (g_source != AUDIO_SRC_OFF);
+  if (audible) {
+    silentSince = 0;
+    if (!ampOn) { digitalWrite(AUDIO_ENABLE, LOW); ampOn = true; }
+  } else if (ampOn) {
+    if (silentSince == 0) silentSince = millis();
+    else if (millis() - silentSince > 800) { digitalWrite(AUDIO_ENABLE, HIGH); ampOn = false; }
   }
 
-  if (!wantAudio && fadeGain <= 0.0f) {
-    for (int32_t i = 0; i < frameCount; i++) {
-      data[i].channel1 = 0;
-      data[i].channel2 = 0;
-    }
-    return frameCount;
+  // Built-in DAC takes the top 8 bits, unsigned. Mix L+R to mono for the
+  // single speaker, then offset to unsigned mid-scale.
+  for (int i = 0; i < 256; i++) {
+    int32_t m = ((int32_t)spkFrames[i].l + spkFrames[i].r) / 2;
+    uint16_t u = (uint16_t)(m + 32768);
+    dacBuf[2 * i] = u;
+    dacBuf[2 * i + 1] = u;
   }
+  size_t written = 0;
+  i2s_write(SPK_I2S_PORT, dacBuf, sizeof(dacBuf), &written, portMAX_DELAY);
+}
 
-  // Either actively wanted, or still fading out from just being turned
-  // off - keep generating the tone either way, multiplied by fadeGain,
-  // which ramps toward 1 (turning on) or 0 (turning off) a little each
-  // sample instead of jumping instantly.
-  ensureSinTable();
-  float useFreq = (targetFreqHz > 0) ? targetFreqHz : 10.0f; // fallback only for a fade-out tail if targetFreqHz was ever cleared
-  AudioMode mode = currentAudioMode(useFreq);
-
-  for (int32_t i = 0; i < frameCount; i++) {
-    float target = wantAudio ? 1.0f : 0.0f;
-    if (fadeGain < target) {
-      fadeGain += FADE_STEP;
-      if (fadeGain > target) fadeGain = target;
-    } else if (fadeGain > target) {
-      fadeGain -= FADE_STEP;
-      if (fadeGain < target) fadeGain = target;
-    }
-
-    int16_t leftSample, rightSample;
-
-    if (mode == MODE_BINAURAL) {
-      float l = fastSin(leftPhase);
-      float r = fastSin(rightPhase);
-      leftSample  = (int16_t)(l * 12000.0f * g_volumeFrac * fadeGain);
-      rightSample = (int16_t)(r * 12000.0f * g_volumeFrac * fadeGain);
-
-      leftPhase  += TWO_PI_F * BINAURAL_CARRIER_HZ / SAMPLE_RATE;
-      rightPhase += TWO_PI_F * (BINAURAL_CARRIER_HZ + useFreq) / SAMPLE_RATE;
-      if (leftPhase  > TWO_PI_F) leftPhase  -= TWO_PI_F;
-      if (rightPhase > TWO_PI_F) rightPhase -= TWO_PI_F;
-
-    } else if (mode == MODE_ISOCHRONIC) {
-      float carrier = fastSin(leftPhase);
-      float envelope = 0.5f + 0.5f * fastSin(envelopePhase);
-      int16_t sample = (int16_t)(carrier * envelope * 12000.0f * g_volumeFrac * fadeGain);
-      leftSample = rightSample = sample;
-
-      leftPhase += TWO_PI_F * ISOCHRONIC_CARRIER_HZ / SAMPLE_RATE;
-      if (leftPhase > TWO_PI_F) leftPhase -= TWO_PI_F;
-      envelopePhase += TWO_PI_F * useFreq / SAMPLE_RATE;
-      if (envelopePhase > TWO_PI_F) envelopePhase -= TWO_PI_F;
-
-    } else { // MODE_DIRECT
-      float audibleFreq = useFreq > DIRECT_TONE_MAX_HZ ? DIRECT_TONE_MAX_HZ : useFreq;
-      float carrier = fastSin(leftPhase);
-      int16_t sample = (int16_t)(carrier * 12000.0f * g_volumeFrac * fadeGain);
-      leftSample = rightSample = sample;
-
-      leftPhase += TWO_PI_F * audibleFreq / SAMPLE_RATE;
-      if (leftPhase > TWO_PI_F) leftPhase -= TWO_PI_F;
-    }
-
-    data[i].channel1 = leftSample;
-    data[i].channel2 = rightSample;
+static void speakerQuiet() {
+  static bool quieted = false;
+  if (g_output == AUDIO_OUT_SPEAKER) { quieted = false; return; }
+  if (!quieted) {
+    digitalWrite(AUDIO_ENABLE, HIGH);
+    if (g_speakerReady) i2s_zero_dma_buffer(SPK_I2S_PORT);
+    quieted = true;
   }
-  return frameCount;
 }
 
-void btaudio_begin(const char* deviceNameToConnect) {
-  // Does not connect yet - actual connection only happens once
-  // btaudio_setEnabled(true) is called, so the coil output can be used
-  // without a headset paired at all.
-  static const char* nameHolder = deviceNameToConnect;
-  (void)nameHolder;
+// ---------------------------------------------------------------------------
+// Bluetooth (A2DP source)
+// ---------------------------------------------------------------------------
+static BluetoothA2DPSource a2dp;
+static char btName[64] = "";
+static bool btStarted = false;
+static bool btVolumeSent = false;
+
+static int32_t btDataCallback(Frame* data, int32_t len) {
+  if (g_output != AUDIO_OUT_BLUETOOTH) {
+    memset(data, 0, len * sizeof(Frame));
+    return len;
+  }
+  renderFrames((StereoFrame*)data, len);
+  return len;
 }
 
-void btaudio_setTargetFrequency(float freqHz) {
-  targetFreqHz = freqHz;
+static void btService() {
+  if (btStarted && !btVolumeSent && a2dp.is_connected()) {
+    a2dp.set_volume(100); // ~80% of the device's range; our own volume does the rest
+    btVolumeSent = true;
+  }
+  if (btStarted && !a2dp.is_connected()) btVolumeSent = false;
 }
 
-void btaudio_setVolume(uint8_t percent) {
+// ---------------------------------------------------------------------------
+// The audio task
+// ---------------------------------------------------------------------------
+static void audioTask(void*) {
+  for (;;) {
+    serviceSoundscapeFile();
+    btService();
+    speakerQuiet();
+    if (g_output == AUDIO_OUT_SPEAKER && g_speakerReady) {
+      speakerPump(); // blocks in i2s_write -> paces this loop (~5.8 ms per pass)
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+void audio_begin() {
+  static bool begun = false;
+  if (begun) return;
+  begun = true;
+  for (int i = 0; i < SIN_N; i++) sinTable[i] = sinf(TWO_PI_F * i / SIN_N);
+  speakerInit();
+  xTaskCreatePinnedToCore(audioTask, "audio", 6144, NULL, 3, NULL, 1);
+}
+
+void audio_setOutput(AudioOutput out) { g_output = out; }
+AudioOutput audio_getOutput() { return g_output; }
+
+void audio_setSource(AudioSource src) { g_source = src; }
+AudioSource audio_getSource() { return g_source; }
+
+void audio_setToneFrequency(float hz) { g_toneHz = hz; }
+
+bool audio_setSoundscapeFile(const char* path) {
+  if (!path || !path[0]) return false;
+  if (strcmp(path, currentPath) == 0) return true; // already loaded
+  strncpy(currentPath, path, sizeof(currentPath) - 1);
+  currentPath[sizeof(currentPath) - 1] = 0;
+  portENTER_CRITICAL(&pathMux);
+  strncpy(pendingPath, path, sizeof(pendingPath) - 1);
+  pendingPath[sizeof(pendingPath) - 1] = 0;
+  pendingOpen = true;
+  portEXIT_CRITICAL(&pathMux);
+  return true;
+}
+const char* audio_soundscapeFile() { return currentPath; }
+
+void audio_setVolume(uint8_t percent) {
   if (percent > 100) percent = 100;
-  g_volumeFrac = percent / 100.0f;
+  g_volume = percent / 100.0f;
 }
 
-static char g_deviceName[64] = "";
-static bool g_started = false;
-static bool a2dpSourceStarted = false; // true once ANY a2dp_source.start() call has happened - scan or connect
-static bool volumeSetForThisConnection = false;
+void audio_setHeadphonesMode(bool on) { g_headphones = on; }
+bool audio_isHeadphonesMode() { return g_headphones; }
 
-void btaudio_setEnabled(bool on) {
-  enabled = on;
-  if (on && !g_started && strlen(g_deviceName) > 0) {
-    a2dp_source.start(g_deviceName, get_sound_data);
-    a2dpSourceStarted = true;
-    g_started = true;
-    volumeSetForThisConnection = false; // deferred until the connection is actually confirmed - see btaudio_update()
+void audio_setBtDeviceName(const char* name) {
+  strncpy(btName, name ? name : "", sizeof(btName) - 1);
+  btName[sizeof(btName) - 1] = 0;
+}
+const char* audio_btDeviceName() { return btName; }
+
+void audio_btConnect() {
+  if (btStarted || btName[0] == 0) return;
+  a2dp.set_data_callback_in_frames(btDataCallback);
+  a2dp.set_auto_reconnect(true);
+  a2dp.start(btName); // returns quickly; the connection completes in the background
+  btStarted = true;
+  btVolumeSent = false;
+}
+bool audio_btStarted() { return btStarted; }
+bool audio_btIsConnected() { return btStarted && a2dp.is_connected(); }
+
+void audio_btEnd() {
+  if (btStarted) {
+    a2dp.end();
+    btStarted = false;
   }
 }
 
-// Call periodically from loop() - a2dp_source.start() only *initiates*
-// the connection; it isn't necessarily established yet by the time it
-// returns. Sending the AVRCP volume command before the connection is
-// actually up meant it could be silently lost, which is a real,
-// confirmed explanation for the volume still starting low sometimes
-// despite this command already being in place. This waits for
-// is_connected() to actually go true before sending it, once per
-// connection.
-void btaudio_update() {
-  if (g_started && !volumeSetForThisConnection && a2dp_source.is_connected()) {
-    // Deliberately NOT the absolute max (127) - headphones sit right at
-    // the ear, so fully opening a device's own hardware volume and
-    // relying entirely on our own scaling to bring it back down is a
-    // real hearing-safety consideration, not just an audibility one.
-    // ~80% still fixes the "too quiet by default" problem while
-    // leaving genuine headroom. Our own volumePercent remains the real,
-    // meaningful control either way.
-    a2dp_source.set_volume(100); // ~80% of the library's 0-127 range
-    volumeSetForThisConnection = true;
-  }
-  // Keeps the soundscape ring buffer topped up from SD - see the note
-  // by SND_RING_SIZE above for why this can't happen inside the
-  // get_sound_data() callback itself.
-  refillSoundscapeRing();
-}
-
-bool btaudio_isEnabled() { return enabled; }
-
-bool btaudio_isConnected() {
-  return g_started && a2dp_source.is_connected();
-}
-
-// ---------------------------------------------------------------------
-// Device scan
-// ---------------------------------------------------------------------
+// ---- scan ----
 static char scanResults[BT_SCAN_MAX_RESULTS][32];
-static int scanResultCount = 0;
-static volatile bool scanningActive = false;
+static volatile int scanCount = 0;
+static volatile bool scanning = false;
 
-// Fires once per discovered device during a2dp_source.start() with no
-// name given. Always returns false (never auto-accept) so the scan keeps
-// running and collecting names - the person picks manually from the UI.
 static bool onSsidFound(const char* ssid, esp_bd_addr_t address, int rssi) {
-  if (!ssid || strlen(ssid) == 0) return false;
-  if (scanResultCount >= BT_SCAN_MAX_RESULTS) return false;
-  for (int i = 0; i < scanResultCount; i++) {
-    if (strcmp(scanResults[i], ssid) == 0) return false; // already have it
-  }
-  strncpy(scanResults[scanResultCount], ssid, sizeof(scanResults[0]) - 1);
-  scanResults[scanResultCount][sizeof(scanResults[0]) - 1] = 0;
-  scanResultCount++;
-  return false;
+  if (!ssid || !ssid[0] || scanCount >= BT_SCAN_MAX_RESULTS) return false;
+  for (int i = 0; i < scanCount; i++) if (strcmp(scanResults[i], ssid) == 0) return false;
+  strncpy(scanResults[scanCount], ssid, sizeof(scanResults[0]) - 1);
+  scanResults[scanCount][sizeof(scanResults[0]) - 1] = 0;
+  scanCount++;
+  return false; // never auto-connect - the person picks from the list
 }
 
 static void onDiscoveryModeChanged(esp_bt_gap_discovery_state_t mode) {
-  scanningActive = (mode == ESP_BT_GAP_DISCOVERY_STARTED);
+  scanning = (mode == ESP_BT_GAP_DISCOVERY_STARTED);
 }
 
-void btaudio_startScan() {
-  scanResultCount = 0;
-  a2dp_source.set_ssid_callback(onSsidFound);
-  a2dp_source.set_discovery_mode_callback(onDiscoveryModeChanged);
-  a2dp_source.start(); // empty name list -> open discovery, per the library's own API
-  a2dpSourceStarted = true;
+void audio_btStartScan() {
+  scanCount = 0;
+  a2dp.set_ssid_callback(onSsidFound);
+  a2dp.set_discovery_mode_callback(onDiscoveryModeChanged);
+  a2dp.set_data_callback_in_frames(btDataCallback);
+  a2dp.start(); // no name -> open discovery
+  btStarted = true;
 }
-
-void btaudio_stopScan() {
-  a2dp_source.cancel_discovery();
-}
-
-// Full teardown of the Bluetooth stack - call this before any ESP.restart(),
-// so a software reset doesn't abruptly cut off a still-active BT session.
-// Confirmed via testing: skipping this caused touch/SPI flakiness on the
-// first screen(s) shown right after such a restart (the touchscreen shares
-// the SPI bus, and an uncleanly-terminated radio session left it briefly
-// unsettled) - a normal power-on doesn't have this issue since it's a true
-// hardware reset, not a software one.
-void btaudio_endSession() {
-  if (a2dpSourceStarted) {
-    a2dp_source.end();
-    a2dpSourceStarted = false;
-    g_started = false;
-  }
-}
-
-bool btaudio_isScanning() { return scanningActive; }
-int btaudio_scanResultCount() { return scanResultCount; }
-
-const char* btaudio_scanResultName(int idx) {
-  if (idx < 0 || idx >= scanResultCount) return "";
+void audio_btStopScan() { if (btStarted) a2dp.cancel_discovery(); }
+bool audio_btIsScanning() { return scanning; }
+int audio_btScanResultCount() { return scanCount; }
+const char* audio_btScanResultName(int idx) {
+  if (idx < 0 || idx >= scanCount) return "";
   return scanResults[idx];
 }
 
-// After two attempts to redirect an already-running A2DP session mid-flight
-// (both confirmed not to work by real device testing), this just records
-// the chosen name. The actual connection happens on the next boot, calling
-// start() exactly once, fresh - the one pattern every official example of
-// this library uses successfully. See handleBtScanTouch() in the .ino,
-// which saves this name and restarts the device right after calling this.
-void btaudio_connectToScanResult(int idx) {
-  if (idx < 0 || idx >= scanResultCount) return;
-  strncpy(g_deviceName, scanResults[idx], sizeof(g_deviceName) - 1);
-  g_deviceName[sizeof(g_deviceName) - 1] = 0;
-}
-
-void btaudio_setSavedDeviceName(const char* name) {
-  strncpy(g_deviceName, name, sizeof(g_deviceName) - 1);
-  g_deviceName[sizeof(g_deviceName) - 1] = 0;
-}
+bool audio_speakerReady() { return g_speakerReady; }
+unsigned long audio_underruns() { return g_underruns; }

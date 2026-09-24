@@ -15,6 +15,12 @@
 bool sdmedia_begin();          // attempt to mount the card once, at boot
 bool sdmedia_isAvailable();
 
+// The audio task streams soundscapes from the card while the UI may be
+// drawing the splash image from it - every SD access takes this lock
+// (recursive, so nested use is fine).
+void sdmedia_lock();
+void sdmedia_unlock();
+
 // Splash screen - draws /splash.bmp full-screen if the card is mounted
 // and that file exists. Returns false (and draws nothing) otherwise -
 // the caller falls through to the normal Welcome screen either way.

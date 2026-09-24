@@ -1,4 +1,6 @@
 #include "sd_media.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <SPI.h>
 #include <SD.h>
 #include <TFT_eSPI.h>
@@ -23,10 +25,22 @@ static bool sdAvailable = false;
 // matrix (any pin can route to either peripheral) - genuinely separate
 // hardware, not just separate pin numbers.
 static SPIClass sdSPI(HSPI);
+static SemaphoreHandle_t sdMutex = nullptr;
+
+void sdmedia_lock() {
+  if (!sdMutex) sdMutex = xSemaphoreCreateRecursiveMutex();
+  xSemaphoreTakeRecursive(sdMutex, portMAX_DELAY);
+}
+void sdmedia_unlock() {
+  if (sdMutex) xSemaphoreGiveRecursive(sdMutex);
+}
 
 bool sdmedia_begin() {
+  sdmedia_lock();
   sdSPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
-  sdAvailable = SD.begin(SD_CS, sdSPI);
+  sdAvailable = SD.begin(SD_CS, sdSPI, 20000000); // faster clock = quicker splash + easy soundscape streaming
+  if (!sdAvailable) sdAvailable = SD.begin(SD_CS, sdSPI); // fall back to the library's safe default clock
+  sdmedia_unlock();
   return sdAvailable;
 }
 
@@ -54,48 +68,79 @@ static uint32_t read32(fs::File &f) {
   return result;
 }
 
+// Reads ROWS_PER_CHUNK rows per SD read (one big read is far faster than
+// hundreds of tiny ones) and releases the SD lock between chunks so a
+// playing soundscape never starves while the splash is being drawn.
+static const int ROWS_PER_CHUNK = 8;
+
 static bool drawBmpFromSd(const char *filename, int16_t x, int16_t y) {
   if ((x >= tft.width()) || (y >= tft.height())) return false;
+  sdmedia_lock();
   fs::File bmpFS = SD.open(filename, FILE_READ);
-  if (!bmpFS) return false;
+  if (!bmpFS) { sdmedia_unlock(); return false; }
 
   bool ok = false;
+  uint16_t w = 0, h = 0;
+  uint32_t seekOffset = 0;
+  bool valid = false;
   if (read16(bmpFS) == 0x4D42) { // "BM" signature
     read32(bmpFS);               // file size (unused)
-    read32(bmpFS);                // reserved
-    uint32_t seekOffset = read32(bmpFS);
-    read32(bmpFS);                // header size (unused)
-    uint16_t w = read32(bmpFS);
-    uint16_t h = read32(bmpFS);
+    read32(bmpFS);               // reserved
+    seekOffset = read32(bmpFS);
+    read32(bmpFS);               // header size (unused)
+    w = read32(bmpFS);
+    h = read32(bmpFS);
+    valid = (read16(bmpFS) == 1) && (read16(bmpFS) == 24) && (read32(bmpFS) == 0) && w > 0 && w <= 480;
+  }
+  sdmedia_unlock();
 
-    if ((read16(bmpFS) == 1) && (read16(bmpFS) == 24) && (read32(bmpFS) == 0)) {
-      y += h - 1; // BMP rows are bottom-up
+  if (valid) {
+    uint16_t padding = (4 - ((w * 3) & 3)) & 3;
+    uint32_t rowBytes = w * 3 + padding;
+    uint8_t* buf = (uint8_t*)malloc(rowBytes * ROWS_PER_CHUNK);
+    if (buf) {
       bool oldSwapBytes = tft.getSwapBytes();
       tft.setSwapBytes(true);
-      bmpFS.seek(seekOffset);
-      uint16_t padding = (4 - ((w * 3) & 3)) & 3;
-      uint8_t lineBuffer[w * 3 + padding];
-      for (uint16_t row = 0; row < h; row++) {
-        bmpFS.read(lineBuffer, sizeof(lineBuffer));
-        uint8_t* bptr = lineBuffer;
-        uint16_t* tptr = (uint16_t*)lineBuffer;
-        for (uint16_t col = 0; col < w; col++) {
-          uint8_t b = *bptr++, g = *bptr++, r = *bptr++;
-          *tptr++ = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+      int16_t rowY = y + h - 1; // BMP rows are stored bottom-up
+      uint32_t filePos = seekOffset;
+      for (uint16_t row = 0; row < h; row += ROWS_PER_CHUNK) {
+        int rows = (h - row < ROWS_PER_CHUNK) ? (h - row) : ROWS_PER_CHUNK;
+        sdmedia_lock();
+        bmpFS.seek(filePos);
+        bmpFS.read(buf, rowBytes * rows);
+        sdmedia_unlock();
+        filePos += rowBytes * rows;
+        for (int r = 0; r < rows; r++) {
+          uint8_t* bptr = buf + r * rowBytes;
+          uint16_t* tptr = (uint16_t*)bptr; // converted in place (2 bytes out per 3 in)
+          for (uint16_t col = 0; col < w; col++) {
+            uint8_t b = *bptr++, g = *bptr++, rr = *bptr++;
+            *tptr++ = ((rr & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+          }
+          tft.pushImage(x, rowY--, w, 1, (uint16_t*)(buf + r * rowBytes));
         }
-        tft.pushImage(x, y--, w, 1, (uint16_t*)lineBuffer);
       }
       tft.setSwapBytes(oldSwapBytes);
+      free(buf);
       ok = true;
     }
   }
+  sdmedia_lock();
   bmpFS.close();
+  sdmedia_unlock();
   return ok;
 }
 
+static int splashState = -1; // -1 unknown, 0 missing, 1 present - checked once, not on every screen
+
 bool sdmedia_showSplash() {
   if (!sdAvailable) return false;
-  if (!SD.exists("/splash.bmp")) return false;
+  if (splashState < 0) {
+    sdmedia_lock();
+    splashState = SD.exists("/splash.bmp") ? 1 : 0;
+    sdmedia_unlock();
+  }
+  if (splashState == 0) return false;
   return drawBmpFromSd("/splash.bmp", 0, 0);
 }
 
@@ -119,6 +164,9 @@ int sdmedia_scanSoundscapes() {
   lastScanTotalEntries = 0;
   lastScanFileEntries = 0;
   if (!sdAvailable) return 0;
+
+  sdmedia_lock();
+  struct Unlocker { ~Unlocker() { sdmedia_unlock(); } } unlocker; // released on every return path
 
   fs::File dir = SD.open("/sounds");
   if (!dir || !dir.isDirectory()) return 0;

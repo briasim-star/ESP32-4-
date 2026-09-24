@@ -78,6 +78,11 @@ void waveform_begin() {
   pinMode(PIN_MD10C_DIR, OUTPUT);
   digitalWrite(PIN_MD10C_DIR, LOW);
 
+  // IO25 is also the chip's DAC1 pin. pinMode() (gpio_config) releases it
+  // from the analog/RTC side in case audio setup ever touched it, so the
+  // coil PWM is guaranteed to reach the pin.
+  pinMode(PIN_MD10C_PWM, OUTPUT);
+  digitalWrite(PIN_MD10C_PWM, LOW);
   ledcSetup(PWM_CHANNEL_MAG, SINE_CARRIER_HZ, PWM_RES_BITS);
   ledcAttachPin(PIN_MD10C_PWM, PWM_CHANNEL_MAG);
   ledcWrite(PWM_CHANNEL_MAG, 0);

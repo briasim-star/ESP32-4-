@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.2.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.3.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -121,9 +121,7 @@ const char* selCategoryName = "";
 // Adjustable settings, controlled by steppers on the Run screen.
 int powerDisplay = 10;       // what the user sees, 1-100 - NOT the actual output
 int timerMinutes = 30;       // default 30 min auto-stop; 0 = continuous (Off), max 60
-int volumePercent = 60;      // BT audio volume, independent of coil output
-
-bool btAudioOn = false;
+int volumePercent = 60;      // audio volume (speaker or BT), independent of coil output
 
 // Program-related mode flags - declared early (not down with the rest of
 // the Program/Category code) since they're referenced by functions that
@@ -323,62 +321,91 @@ char btDeviceName[32] = ""; // last-selected BT speaker/headphone, empty until s
 bool btHeadphonesMode = false; // user-set: is that paired device headphones (true binaural beats work) or a speaker (mono-equivalent instead)?
 
 // ---------------------------------------------------------------------
-// Audio output auto-selection - this is the ONLY place that decides
-// Bluetooth vs. the local wired speaker (local_audio.h), based on
-// whether a Bluetooth device is currently configured. Every other piece
-// of code calls these wrapper functions instead of btaudio_*/
-// localaudio_* directly, so the two paths can never disagree about
-// which one is actually "live" at any given moment.
+// Audio choices (engine lives in bt_audio.cpp and runs in its own task)
+//   audioOutputPref  - Speaker or Bluetooth, chosen in Settings (saved)
+//   sessionSoundMode - what plays during a session: Off / Tone / Soundscape
+//                      (saved - it's the pre-selection for every session)
+//   sessionSoundscapeIndex - which soundscape; auto-picked per session to
+//                      suit its category, changeable from the Run screen
+//   previewSoundscapeIndex - a soundscape being previewed from Settings
 // ---------------------------------------------------------------------
-bool audioUsingBluetooth() { return strlen(btDeviceName) > 0; }
+AudioOutput audioOutputPref = AUDIO_OUT_SPEAKER;
+AudioSource sessionSoundMode = AUDIO_SRC_TONE;
+int sessionSoundscapeIndex = -1;
+int previewSoundscapeIndex = -1;
 
-void audio_setEnabled(bool on) {
+bool audioUsingBluetooth() {
 #if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) { btaudio_setEnabled(on); return; }
+  return audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0;
+#else
+  return false;
 #endif
-  localaudio_setEnabled(on);
 }
 
-void audio_setTargetFrequency(float hz) {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) { btaudio_setTargetFrequency(hz); return; }
-#endif
-  localaudio_setTargetFrequency(hz);
+// Pushes the saved output choice into the engine (and starts the BT
+// connection in the background when Bluetooth is chosen - non-blocking).
+void applyAudioOutput() {
+  if (audioUsingBluetooth()) {
+    audio_setOutput(AUDIO_OUT_BLUETOOTH);
+    audio_btConnect();
+  } else {
+    audio_setOutput(AUDIO_OUT_SPEAKER);
+  }
 }
 
-void audio_setVolume(uint8_t percent) {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) { btaudio_setVolume(percent); return; }
-#endif
-  localaudio_setVolume(percent);
+// Case-insensitive "does name contain keyword"
+bool nameHas(const char* name, const char* kw) {
+  size_t n = strlen(name), k = strlen(kw);
+  for (size_t i = 0; i + k <= n; i++) {
+    size_t j = 0;
+    while (j < k && tolower(name[i + j]) == tolower(kw[j])) j++;
+    if (j == k) return true;
+  }
+  return false;
 }
 
-bool audio_isEnabled() {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) return btaudio_isEnabled();
-#endif
-  return localaudio_isEnabled();
+// Picks a soundscape that suits the session - matched by file name, so
+// it works with whatever is on the card (rain, ocean_waves, forest,
+// fireplace, thunder, city_ambience...). Falls back to the first file.
+int defaultSoundscapeFor(const char* categoryName, float freqHz) {
+  int n = sdmedia_soundscapeCount();
+  if (n == 0) return -1;
+  const char* sleepy[]   = {"rain", "ocean", "fire"};
+  const char* focus[]    = {"forest", "fire", "rain"};
+  const char* athletic[] = {"thunder", "forest", "ocean"};
+  const char* body[]     = {"ocean", "rain", "forest"};
+  const char* general[]  = {"forest", "ocean", "rain"};
+  const char** prefs = general;
+  if (nameHas(categoryName, "sleep") || nameHas(categoryName, "relax") || freqHz <= 4.0f) prefs = sleepy;
+  else if (nameHas(categoryName, "focus")) prefs = focus;
+  else if (nameHas(categoryName, "athletic")) prefs = athletic;
+  else if (nameHas(categoryName, "body") || nameHas(categoryName, "skin")) prefs = body;
+  for (int p = 0; p < 3; p++)
+    for (int i = 0; i < n; i++)
+      if (nameHas(sdmedia_soundscapeName(i), prefs[p])) return i;
+  return 0;
 }
 
-bool audio_startSoundscape(const char* path) {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) return btaudio_startSoundscape(path);
-#endif
-  return localaudio_startSoundscape(path);
+// "ocean_waves" -> "Ocean Waves"
+void prettySoundName(int idx, char* out, size_t outLen) {
+  const char* raw = sdmedia_soundscapeName(idx);
+  size_t i = 0;
+  bool cap = true;
+  for (; raw[i] && i < outLen - 1; i++) {
+    char c = (raw[i] == '_' || raw[i] == '-') ? ' ' : raw[i];
+    out[i] = cap ? toupper(c) : c;
+    cap = (c == ' ');
+  }
+  out[i] = 0;
 }
 
-void audio_stopSoundscape() {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) { btaudio_stopSoundscape(); return; }
-#endif
-  localaudio_stopSoundscape();
-}
-
-bool audio_isSoundscapePlaying() {
-#if ENABLE_BT_AUDIO
-  if (audioUsingBluetooth()) return btaudio_isSoundscapePlaying();
-#endif
-  return localaudio_isSoundscapePlaying();
+// Splash as a background on the important screens (Welcome, Home, Run).
+// Right after boot the splash is already on screen, so the first screen
+// reuses it instead of drawing the same image a second time.
+bool splashOnScreen = false;
+void drawSplashBackground() {
+  if (splashOnScreen) { splashOnScreen = false; return; }
+  if (!sdmedia_showSplash()) tft.fillScreen(COLOR_BG);
 }
 
 
@@ -398,6 +425,9 @@ void loadSetupInfo() {
   strncpy(btDeviceName, bt.c_str(), sizeof(btDeviceName) - 1);
   btDeviceName[sizeof(btDeviceName) - 1] = 0;
   btHeadphonesMode = p.getBool("btHeadphones", false);
+  audioOutputPref = (AudioOutput)p.getUChar("audioOut", AUDIO_OUT_SPEAKER);
+  sessionSoundMode = (AudioSource)p.getUChar("sndMode", AUDIO_SRC_TONE);
+  volumePercent = p.getInt("volume", 60);
   p.end();
 
   // Room label lives in its own namespace, separate from "setup" - it's a
@@ -423,6 +453,9 @@ void saveSetupInfo() {
   p.putString("loginPw", loginPassword);
   p.putString("btDevice", btDeviceName);
   p.putBool("btHeadphones", btHeadphonesMode);
+  p.putUChar("audioOut", (uint8_t)audioOutputPref);
+  p.putUChar("sndMode", (uint8_t)sessionSoundMode);
+  p.putInt("volume", volumePercent);
   p.end();
 
   Preferences rp;
@@ -607,9 +640,7 @@ void drawWelcomeScreen() {
   // guaranteed readability matters more here than anywhere else in the
   // app, more than just picking a background area that "looks" like it
   // has enough contrast.
-  if (!sdmedia_showSplash()) {
-    tft.fillScreen(COLOR_BG);
-  }
+  drawSplashBackground();
   tft.fillRect(0, 0, 480, 178, COLOR_BG);
 
   tft.setFreeFont(FONT_LG);
@@ -662,21 +693,13 @@ void drawWelcomeScreen() {
     tft.drawString(sdDiag, 20, 282);
   }
 
-  // Same idea for the local speaker's I2S driver - confirm on-screen
-  // whether it actually installed, and whether writes to it are
-  // actually succeeding, rather than continuing to assume it works
-  // without ever having verified it on real hardware. Counts are
-  // cumulative for the whole session, so testing audio then coming back
-  // to this screen shows what actually happened during that test.
-  if (!localaudio_didInstallSucceed()) {
-    tft.drawString("Local speaker: I2S driver FAILED to install", 20, 302);
+  char audioDiag[64];
+  if (audioUsingBluetooth()) {
+    snprintf(audioDiag, sizeof(audioDiag), "Sound out: Bluetooth (%s)", btDeviceName);
   } else {
-    char audioDiag[64];
-    snprintf(audioDiag, sizeof(audioDiag), "Spkr: I2S OK, enabled=%d freq=%.0f written=%lu failed=%lu",
-             localaudio_isEnabled() ? 1 : 0, localaudio_getTargetFrequency(),
-             localaudio_totalSamplesWritten(), localaudio_totalWriteFailures());
-    drawFittedText(20, 302, 440, audioDiag, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+    snprintf(audioDiag, sizeof(audioDiag), "Sound out: Speaker (%s)", audio_speakerReady() ? "ready" : "DRIVER FAILED");
   }
+  drawFittedText(20, 302, 440, audioDiag, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
 }
 
 // The checkbox and Continue button are the only things on this screen
@@ -1269,7 +1292,7 @@ void performFactoryReset() {
   // NOT cleared - those are characteristics of this physical unit and its
   // placement, not resettable user settings.
   if (wifitime_isConfigured()) wifitime_forgetNetwork();
-  btaudio_endSession(); // clean BT teardown before restarting - see the note in bt_audio.cpp
+  audio_btEnd(); // clean BT teardown before restarting
   ESP.restart();
 }
 
@@ -1287,7 +1310,7 @@ Screen soundscapesOrigin = SCR_SETTINGS; // where Soundscapes' "Back" returns to
 int buildVisibleSettingsItems(SettingsItemId* out) {
   int n = 0;
   out[n++] = SET_DEV_MODE;
-  out[n++] = SET_GAMES;
+  out[n++] = SET_AUDIO_OUT;
   out[n++] = SET_CHECK_UPDATES;
   out[n++] = SET_BT_DEVICE;
   out[n++] = SET_ROOM_OR_PEOPLE;
@@ -1312,8 +1335,9 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
         snprintf(labelOut, labelLen, "Unlock Dev Mode");
       }
       break;
-    case SET_GAMES:
-      snprintf(labelOut, labelLen, "Games");
+    case SET_AUDIO_OUT:
+      snprintf(labelOut, labelLen, audioUsingBluetooth() ? "Sound Out: Bluetooth" : "Sound Out: Speaker");
+      *activeOut = true;
       break;
     case SET_CHECK_UPDATES:
       snprintf(labelOut, labelLen, "Check for Updates");
@@ -1358,9 +1382,7 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       snprintf(labelOut, labelLen, "Session Log");
       break;
     case SET_SOUNDSCAPES:
-      if (audio_isSoundscapePlaying()) snprintf(labelOut, labelLen, "Soundscapes: Playing");
-      else snprintf(labelOut, labelLen, "Soundscapes (%d available)", sdmedia_soundscapeCount());
-      *activeOut = audio_isSoundscapePlaying();
+      snprintf(labelOut, labelLen, "Soundscapes (%d)", sdmedia_soundscapeCount());
       break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed && millis() - factoryResetArmedAt > FACTORY_RESET_ARM_WINDOW_MS) factoryResetArmed = false;
@@ -1379,8 +1401,20 @@ void handleSettingsItemTap(SettingsItemId id) {
       if (devModeUnlocked) { relockDevMode(); screen = SCR_SETTINGS; }
       else startPinEntry(PIN_DEV_MODE);
       break;
-    case SET_GAMES:
-      screen = SCR_GAMES_MENU;
+    case SET_AUDIO_OUT:
+      if (audioUsingBluetooth()) {
+        audioOutputPref = AUDIO_OUT_SPEAKER;       // BT -> onboard speaker
+        saveSetupInfo();
+        applyAudioOutput();
+        screen = SCR_SETTINGS;
+      } else if (strlen(btDeviceName) > 0) {
+        audioOutputPref = AUDIO_OUT_BLUETOOTH;     // speaker -> saved BT device
+        saveSetupInfo();
+        applyAudioOutput();
+        screen = SCR_SETTINGS;
+      } else {
+        screen = SCR_BT_SCAN;                      // no BT device yet - pick one first
+      }
       break;
     case SET_CHECK_UPDATES:
       screen = SCR_UPDATE;
@@ -1606,7 +1640,7 @@ void drawBtScanScreen() {
   tft.drawString("Bluetooth Device", 20, 6);
   drawHomeButton();
 
-  bool scanning = btaudio_isScanning();
+  bool scanning = audio_btIsScanning();
   const char* scanLabel = scanning ? "Scanning... (tap to stop)"
                         : scanRequested ? "Starting scan..."
                         : "Scan for Devices";
@@ -1631,7 +1665,7 @@ void drawBtScanScreen() {
     gridStartY = 138;
   }
 
-  int count = btaudio_scanResultCount();
+  int count = audio_btScanResultCount();
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1647,7 +1681,7 @@ void drawBtScanScreen() {
     Rect r = {20 + col * (colW + gapX), gridStartY + row * (rowH + gapY), colW, rowH};
     btScanResultRects[i] = r;
     if (i < shown) {
-      drawButtonFast(r, btaudio_scanResultName(i));
+      drawButtonFast(r, audio_btScanResultName(i));
     }
   }
   if (count > 6) {
@@ -1658,16 +1692,16 @@ void drawBtScanScreen() {
 
 void handleBtScanTouch(int x, int y) {
   if (handleHomeTouch(x, y)) {
-    if (btaudio_isScanning()) btaudio_stopScan();
+    if (audio_btIsScanning()) audio_btStopScan();
     scanRequested = false;
     return;
   }
   if (touchInRect(x, y, btnScanToggle)) {
-    if (btaudio_isScanning() || scanRequested) {
-      btaudio_stopScan();
+    if (audio_btIsScanning() || scanRequested) {
+      audio_btStopScan();
       scanRequested = false;
     } else {
-      btaudio_startScan();
+      audio_btStartScan();
       scanRequested = true;
     }
     screen = SCR_BT_SCAN;
@@ -1675,17 +1709,19 @@ void handleBtScanTouch(int x, int y) {
   }
   if (strlen(btDeviceName) > 0 && touchInRect(x, y, btnHeadphonesToggle)) {
     btHeadphonesMode = !btHeadphonesMode;
-    btaudio_setHeadphonesMode(btHeadphonesMode);
+    audio_setHeadphonesMode(btHeadphonesMode);
     saveSetupInfo();
     screen = SCR_BT_SCAN;
     return;
   }
   if (strlen(btDeviceName) > 0 && touchInRect(x, y, btnForgetBt)) {
     if (btForgetArmed) {
-      btDeviceName[0] = 0; // now empty, so audioUsingBluetooth() correctly falls back to the local speaker
+      btDeviceName[0] = 0;
       btHeadphonesMode = false;
       btForgetArmed = false;
+      audioOutputPref = AUDIO_OUT_SPEAKER; // back to the onboard speaker
       saveSetupInfo();
+      applyAudioOutput();
     } else {
       btForgetArmed = true;
       btForgetArmedAt = millis();
@@ -1693,16 +1729,16 @@ void handleBtScanTouch(int x, int y) {
     screen = SCR_BT_SCAN;
     return;
   }
-  int count = btaudio_scanResultCount();
+  int count = audio_btScanResultCount();
   int shown = count < 6 ? count : 6;
   for (int i = 0; i < shown; i++) {
     if (touchInRect(x, y, btScanResultRects[i])) {
-      btaudio_stopScan();
-      btaudio_connectToScanResult(i);
-      strncpy(btDeviceName, btaudio_scanResultName(i), sizeof(btDeviceName) - 1);
+      audio_btStopScan();
+      strncpy(btDeviceName, audio_btScanResultName(i), sizeof(btDeviceName) - 1);
       btDeviceName[sizeof(btDeviceName) - 1] = 0;
+      audioOutputPref = AUDIO_OUT_BLUETOOTH; // picking a device means "use Bluetooth"
       saveSetupInfo();
-      btaudio_endSession(); // clean BT teardown before restarting - see the note in bt_audio.cpp
+      audio_btEnd(); // clean BT teardown; it reconnects to the chosen device after restart
       // The actual connection only happens cleanly on a fresh boot - see
       // the comment in btaudio_connectToScanResult(). Show a brief message
       // so this doesn't look like a freeze right before it restarts.
@@ -1999,9 +2035,7 @@ void drawCategoryScreen() {
   // to the plain solid color if there's no SD card. This screen's own
   // buttons already have their own solid panel fills (readable either
   // way); only the plain title text needs its own backing strip.
-  if (!sdmedia_showSplash()) {
-    tft.fillScreen(COLOR_BG);
-  }
+  drawSplashBackground();
   tft.fillRect(0, 0, 480, 36, COLOR_BG);
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
@@ -2247,791 +2281,20 @@ Rect soundscapeItemRects[SOUNDSCAPES_PER_PAGE];
 Rect btnSndPrevPage = {20, 216, 140, 46};
 Rect btnSndBack = {180, 216, 120, 46};
 Rect btnSndNextPage = {320, 216, 140, 46};
-int nowPlayingSoundscapeIndex = -1;
+
 
 // ---------------------------------------------------------------------
-// Still Point - hold your finger as steady as possible; the calmer the
-// touch, the more a ripple grows. No losing state, no timer. Polls
-// touch independently here rather than through the normal tap-dispatch
-// pattern, since this needs continuous position while held, not just a
-// discrete tap.
+// Soundscapes screen - two uses:
+//   from the Run screen  -> tap one to make it this session's sound
+//                           (returns straight to the session)
+//   from Settings        -> tap to preview / tap again to stop
 // ---------------------------------------------------------------------
-bool stillHeld = false;
-int stillLastX = 0, stillLastY = 0;
-float stillSteadiness = 0; // 0..1 - grows while still, decays when it moves
-float stillLastRadius = -1;
-
-void drawGameStillScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Still Point", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Hold your finger as still as you can", 20, 40);
-  stillHeld = false;
-  stillSteadiness = 0;
-  stillLastRadius = -1;
-}
-
-void handleGameStillTouch(int x, int y) {
-  handleHomeTouch(x, y); // the steadiness tracking itself happens in updateGameStill(), not here
-}
-
-void updateGameStill() {
-  uint16_t tx, ty;
-  bool touched = tft.getTouch(&tx, &ty);
-  if (touched && ty > 60) {
-    if (stillHeld) {
-      int dx = (int)tx - stillLastX, dy = (int)ty - stillLastY;
-      int distSq = dx * dx + dy * dy;
-      if (distSq < 25) { // moved less than ~5px since last frame - counts as steady
-        stillSteadiness += 0.02f;
-        if (stillSteadiness > 1.0f) stillSteadiness = 1.0f;
-      } else {
-        stillSteadiness -= 0.05f;
-        if (stillSteadiness < 0) stillSteadiness = 0;
-      }
-    }
-    stillHeld = true;
-    stillLastX = tx;
-    stillLastY = ty;
-
-    float radius = 20 + stillSteadiness * 80;
-    if (stillLastRadius >= 0) {
-      tft.drawCircle(stillLastX, stillLastY, (int)stillLastRadius, COLOR_BG);
-    }
-    tft.drawCircle(tx, ty, (int)radius, COLOR_ACCENT);
-    stillLastRadius = radius;
-  } else if (stillHeld) {
-    if (stillLastRadius >= 0) {
-      tft.drawCircle(stillLastX, stillLastY, (int)stillLastRadius, COLOR_BG);
-    }
-    stillHeld = false;
-    stillSteadiness = 0;
-    stillLastRadius = -1;
-  }
-}
-
-// ---------------------------------------------------------------------
-// Color Flow - colored dots drift across the screen; tap them in the
-// right color order. No rush, no fail state - a wrong-color tap is
-// simply ignored rather than penalized.
-// ---------------------------------------------------------------------
-struct FlowDot {
-  float x, y, vx;
-  uint16_t color;
-  bool active;
-};
-static const int MAX_FLOW_DOTS = 6;
-FlowDot flowDots[MAX_FLOW_DOTS];
-uint16_t flowPalette[3];
-int flowNextExpected = 0;
-unsigned long flowLastSpawn = 0;
-
-void drawGameColorFlowScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Color Flow", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap the dots in order: red, blue, green", 20, 40);
-
-  flowPalette[0] = tft.color565(220, 70, 70);
-  flowPalette[1] = tft.color565(70, 140, 220);
-  flowPalette[2] = tft.color565(90, 200, 120);
-  for (int i = 0; i < MAX_FLOW_DOTS; i++) flowDots[i].active = false;
-  flowNextExpected = 0;
-  flowLastSpawn = millis();
-}
-
-void spawnFlowDot() {
-  for (int i = 0; i < MAX_FLOW_DOTS; i++) {
-    if (!flowDots[i].active) {
-      flowDots[i].x = -10;
-      flowDots[i].y = 70 + random(0, 180);
-      flowDots[i].vx = 0.6f + (random(0, 40) / 100.0f);
-      flowDots[i].color = flowPalette[random(0, 3)];
-      flowDots[i].active = true;
-      return;
-    }
-  }
-}
-
-void handleGameColorFlowTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  for (int i = 0; i < MAX_FLOW_DOTS; i++) {
-    if (!flowDots[i].active) continue;
-    int dx = x - (int)flowDots[i].x, dy = y - (int)flowDots[i].y;
-    if (dx * dx + dy * dy < 400) { // within ~20px
-      if (flowDots[i].color == flowPalette[flowNextExpected]) {
-        tft.fillCircle((int)flowDots[i].x, (int)flowDots[i].y, 14, COLOR_BG);
-        flowDots[i].active = false;
-        flowNextExpected = (flowNextExpected + 1) % 3;
-      }
-      return; // wrong-color tap: ignored, no penalty
-    }
-  }
-}
-
-void updateGameColorFlow() {
-  if (millis() - flowLastSpawn > 1500) {
-    spawnFlowDot();
-    flowLastSpawn = millis();
-  }
-  for (int i = 0; i < MAX_FLOW_DOTS; i++) {
-    if (!flowDots[i].active) continue;
-    tft.fillCircle((int)flowDots[i].x, (int)flowDots[i].y, 14, COLOR_BG);
-    flowDots[i].x += flowDots[i].vx;
-    if (flowDots[i].x > 500) {
-      flowDots[i].active = false;
-      continue;
-    }
-    tft.fillCircle((int)flowDots[i].x, (int)flowDots[i].y, 14, flowDots[i].color);
-  }
-}
-
-// ---------------------------------------------------------------------
-// Pulse Match - a gentle pulse appears at a calm, steady tempo; tap
-// along with it. Forgiving timing window, and a missed beat just resets
-// the streak count rather than showing any kind of fail state.
-// ---------------------------------------------------------------------
-unsigned long pulseLastBeat = 0;
-static const unsigned long PULSE_INTERVAL_MS = 1500; // 40 BPM
-int pulseStreak = 0;
-bool pulseFlash = false;
-unsigned long pulseFlashStart = 0;
-bool pulseWasFlashing = false;
-
-void drawGamePulseScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Pulse Match", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap anywhere in time with the pulse", 20, 40);
-  tft.drawCircle(240, 170, 50, COLOR_ACCENT);
-  pulseLastBeat = millis();
-  pulseStreak = 0;
-  pulseFlash = false;
-  pulseWasFlashing = false;
-}
-
-void handleGamePulseTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  if (y < 60) return;
-  unsigned long sinceBeat = millis() - pulseLastBeat;
-  unsigned long distToBeat = sinceBeat < (PULSE_INTERVAL_MS / 2) ? sinceBeat : (PULSE_INTERVAL_MS - sinceBeat);
-  if (distToBeat < 300) { // forgiving +-300ms window
-    pulseStreak++;
-  } else {
-    pulseStreak = 0; // gentle reset - just starts the streak count over, no fail screen
-  }
-  char buf[24];
-  snprintf(buf, sizeof(buf), "Streak: %d", pulseStreak);
-  tft.fillRect(20, 260, 200, 24, COLOR_BG);
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
-  tft.drawString(buf, 20, 260);
-}
-
-void updateGamePulse() {
-  unsigned long elapsed = millis() - pulseLastBeat;
-  if (elapsed >= PULSE_INTERVAL_MS) {
-    pulseLastBeat = millis();
-    pulseFlash = true;
-    pulseFlashStart = millis();
-  }
-  bool shouldFlash = pulseFlash && (millis() - pulseFlashStart < 200);
-  if (shouldFlash != pulseWasFlashing) {
-    tft.fillCircle(240, 170, 50, shouldFlash ? COLOR_ACCENT : COLOR_BG);
-    if (!shouldFlash) tft.drawCircle(240, 170, 50, COLOR_ACCENT); // resting outline when not flashing
-    pulseWasFlashing = shouldFlash;
-  }
-  if (pulseFlash && millis() - pulseFlashStart >= 200) pulseFlash = false;
-}
-
-// ---------------------------------------------------------------------
-// Zen Garden - tap to place a small bloom; they accumulate into a
-// pattern over the session rather than fading like the Ripple engine's
-// shapes. No losing, no timer - purely additive, meditative play.
-// ---------------------------------------------------------------------
-struct ZenBloom { int x, y; uint16_t color; bool active; };
-static const int MAX_ZEN_BLOOMS = 40;
-ZenBloom zenBlooms[MAX_ZEN_BLOOMS];
-int zenNextSlot = 0;
-uint16_t zenPetalColors[4];
-
-void drawGameZenScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Zen Garden", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap to grow a garden", 20, 40);
-  zenPetalColors[0] = tft.color565(230, 180, 200);
-  zenPetalColors[1] = tft.color565(200, 210, 160);
-  zenPetalColors[2] = tft.color565(180, 200, 230);
-  zenPetalColors[3] = tft.color565(230, 200, 160);
-  for (int i = 0; i < MAX_ZEN_BLOOMS; i++) zenBlooms[i].active = false;
-  zenNextSlot = 0;
-}
-
-void handleGameZenTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  if (y < 60) return;
-  int slot = zenNextSlot;
-  zenBlooms[slot].x = x;
-  zenBlooms[slot].y = y;
-  zenBlooms[slot].color = zenPetalColors[slot % 4];
-  zenBlooms[slot].active = true;
-  tft.fillCircle(x, y, 8, zenBlooms[slot].color);
-  tft.drawCircle(x, y, 8, COLOR_ACCENT);
-  zenNextSlot = (zenNextSlot + 1) % MAX_ZEN_BLOOMS; // wraps - the garden itself is never erased, this just bounds the tracking array
-}
-
-// ---------------------------------------------------------------------
-// Bubble Pop - bubbles rise slowly; tap to pop them. No timer, no fail
-// state - a bubble that reaches the top just quietly disappears.
-// ---------------------------------------------------------------------
-struct Bubble { float x, y, vy, r; bool active; };
-static const int MAX_BUBBLES = 8;
-Bubble bubbles[MAX_BUBBLES];
-unsigned long bubbleLastSpawn = 0;
-
-void drawGameBubbleScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Bubble Pop", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap the bubbles as they rise", 20, 40);
-  for (int i = 0; i < MAX_BUBBLES; i++) bubbles[i].active = false;
-  bubbleLastSpawn = millis();
-}
-
-void spawnBubble() {
-  for (int i = 0; i < MAX_BUBBLES; i++) {
-    if (!bubbles[i].active) {
-      bubbles[i].x = 40 + random(0, 400);
-      bubbles[i].y = 320;
-      bubbles[i].vy = 0.4f + (random(0, 40) / 100.0f);
-      bubbles[i].r = 12 + random(0, 10);
-      bubbles[i].active = true;
-      return;
-    }
-  }
-}
-
-void handleGameBubbleTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  for (int i = 0; i < MAX_BUBBLES; i++) {
-    if (!bubbles[i].active) continue;
-    float dx = x - bubbles[i].x, dy = y - bubbles[i].y;
-    if (dx * dx + dy * dy < bubbles[i].r * bubbles[i].r * 2.5f) {
-      tft.fillCircle((int)bubbles[i].x, (int)bubbles[i].y, (int)bubbles[i].r + 1, COLOR_BG);
-      bubbles[i].active = false;
-      return;
-    }
-  }
-}
-
-void updateGameBubbles() {
-  if (millis() - bubbleLastSpawn > 1200) {
-    spawnBubble();
-    bubbleLastSpawn = millis();
-  }
-  for (int i = 0; i < MAX_BUBBLES; i++) {
-    if (!bubbles[i].active) continue;
-    tft.fillCircle((int)bubbles[i].x, (int)bubbles[i].y, (int)bubbles[i].r + 1, COLOR_BG);
-    bubbles[i].y -= bubbles[i].vy;
-    if (bubbles[i].y < 60) {
-      bubbles[i].active = false;
-      continue;
-    }
-    tft.drawCircle((int)bubbles[i].x, (int)bubbles[i].y, (int)bubbles[i].r, COLOR_ACCENT);
-  }
-}
-
-// ---------------------------------------------------------------------
-// Match Two - classic memory-matching, deliberately untimed with no
-// penalty for a wrong guess - mismatched tiles just flip back after a
-// short pause.
-// ---------------------------------------------------------------------
-static const int MATCH_TILE_COUNT = 12; // 6 pairs
-int matchValues[MATCH_TILE_COUNT];
-bool matchRevealed[MATCH_TILE_COUNT];
-bool matchMatched[MATCH_TILE_COUNT];
-int matchFirstPick = -1, matchSecondPick = -1;
-unsigned long matchMismatchShownAt = 0;
-Rect matchTileRects[MATCH_TILE_COUNT];
-uint16_t matchTileColors[6];
-
-void drawMatchTile(int i) {
-  Rect r = matchTileRects[i];
-  int radius = min(r.w, r.h) / 2;
-  if (matchMatched[i]) {
-    tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_BG);
-    tft.drawRoundRect(r.x, r.y, r.w, r.h, radius, matchTileColors[matchValues[i]]);
-  } else if (matchRevealed[i]) {
-    tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, matchTileColors[matchValues[i]]);
-  } else {
-    tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_PANEL);
-    tft.drawRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_ACCENT);
-  }
-}
-
-void drawGameMatchScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Match Two", 20, 8);
-  drawHomeButton();
-
-  matchTileColors[0] = tft.color565(220, 90, 90);
-  matchTileColors[1] = tft.color565(90, 170, 220);
-  matchTileColors[2] = tft.color565(100, 200, 130);
-  matchTileColors[3] = tft.color565(230, 190, 90);
-  matchTileColors[4] = tft.color565(190, 120, 220);
-  matchTileColors[5] = tft.color565(240, 150, 90);
-
-  int vals[MATCH_TILE_COUNT];
-  for (int i = 0; i < 6; i++) { vals[i * 2] = i; vals[i * 2 + 1] = i; }
-  for (int i = MATCH_TILE_COUNT - 1; i > 0; i--) {
-    int j = random(0, i + 1);
-    int tmp = vals[i]; vals[i] = vals[j]; vals[j] = tmp;
-  }
-  for (int i = 0; i < MATCH_TILE_COUNT; i++) {
-    matchValues[i] = vals[i];
-    matchRevealed[i] = false;
-    matchMatched[i] = false;
-  }
-  matchFirstPick = -1;
-  matchSecondPick = -1;
-  matchMismatchShownAt = 0;
-
-  int cols = 4, rows = 3, tileW = 100, tileH = 70, gapX = 10, gapY = 10;
-  int gridW = cols * tileW + (cols - 1) * gapX;
-  int startX = (480 - gridW) / 2;
-  for (int i = 0; i < MATCH_TILE_COUNT; i++) {
-    int col = i % cols, row = i / cols;
-    matchTileRects[i].x = startX + col * (tileW + gapX);
-    matchTileRects[i].y = 50 + row * (tileH + gapY);
-    matchTileRects[i].w = tileW;
-    matchTileRects[i].h = tileH;
-    drawMatchTile(i);
-  }
-}
-
-void handleGameMatchTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  if (matchSecondPick >= 0) return; // waiting for the mismatch pause - see updateGameMatch()
-  for (int i = 0; i < MATCH_TILE_COUNT; i++) {
-    if (matchMatched[i] || matchRevealed[i]) continue;
-    if (touchInRect(x, y, matchTileRects[i])) {
-      matchRevealed[i] = true;
-      drawMatchTile(i);
-      if (matchFirstPick < 0) {
-        matchFirstPick = i;
-      } else {
-        matchSecondPick = i;
-        if (matchValues[matchFirstPick] == matchValues[matchSecondPick]) {
-          matchMatched[matchFirstPick] = true;
-          matchMatched[matchSecondPick] = true;
-          drawMatchTile(matchFirstPick);
-          drawMatchTile(matchSecondPick);
-          matchFirstPick = -1;
-          matchSecondPick = -1;
-        } else {
-          matchMismatchShownAt = millis();
-        }
-      }
-      return;
-    }
-  }
-}
-
-void updateGameMatch() {
-  if (matchSecondPick >= 0 && millis() - matchMismatchShownAt > 800) {
-    matchRevealed[matchFirstPick] = false;
-    matchRevealed[matchSecondPick] = false;
-    drawMatchTile(matchFirstPick);
-    drawMatchTile(matchSecondPick);
-    matchFirstPick = -1;
-    matchSecondPick = -1;
-  }
-}
-
-// ---------------------------------------------------------------------
-// Sand Draw - drag your finger to draw a flowing line that fades away
-// after a few seconds, like drawing in sand. Pure sensory, creative
-// play - polls touch continuously here, same pattern as Still Point.
-// ---------------------------------------------------------------------
-struct SandPoint { int x, y; unsigned long t; bool valid; };
-static const int MAX_SAND_POINTS = 150;
-SandPoint sandPoints[MAX_SAND_POINTS];
-int sandHead = 0;
-int sandTail = 0;
-bool sandWasDown = false;
-static const unsigned long SAND_FADE_MS = 3000;
-
-void drawGameSandScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Sand Draw", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Drag to draw - it fades like sand", 20, 40);
-  for (int i = 0; i < MAX_SAND_POINTS; i++) sandPoints[i].valid = false;
-  sandHead = 0;
-  sandTail = 0;
-  sandWasDown = false;
-}
-
-void handleGameSandTouch(int x, int y) {
-  handleHomeTouch(x, y); // the drawing itself happens in updateGameSand() below
-}
-
-void updateGameSand() {
-  uint16_t tx, ty;
-  bool touched = tft.getTouch(&tx, &ty);
-  if (touched && ty > 60) {
-    int prevIdx = (sandHead - 1 + MAX_SAND_POINTS) % MAX_SAND_POINTS;
-    if (sandWasDown && sandPoints[prevIdx].valid) {
-      tft.drawLine(sandPoints[prevIdx].x, sandPoints[prevIdx].y, tx, ty, COLOR_ACCENT);
-    }
-    sandPoints[sandHead].x = tx;
-    sandPoints[sandHead].y = ty;
-    sandPoints[sandHead].t = millis();
-    sandPoints[sandHead].valid = true;
-    sandHead = (sandHead + 1) % MAX_SAND_POINTS;
-    if (sandHead == sandTail) sandTail = (sandTail + 1) % MAX_SAND_POINTS;
-    sandWasDown = true;
-  } else {
-    sandWasDown = false;
-  }
-
-  while (sandTail != sandHead && sandPoints[sandTail].valid && millis() - sandPoints[sandTail].t > SAND_FADE_MS) {
-    int nextIdx = (sandTail + 1) % MAX_SAND_POINTS;
-    if (sandPoints[nextIdx].valid) {
-      tft.drawLine(sandPoints[sandTail].x, sandPoints[sandTail].y, sandPoints[nextIdx].x, sandPoints[nextIdx].y, COLOR_BG);
-    }
-    sandPoints[sandTail].valid = false;
-    sandTail = nextIdx;
-  }
-}
-
-// ---------------------------------------------------------------------
-// Petal Count - a quieter companion to Breath Bubble: each full paced
-// breath cycle adds one petal to a slowly growing arrangement, with no
-// tapping required - just breathe along and watch it grow. Shares the
-// same phase length as Breath Bubble (BREATH_PHASE_MS, declared here
-// since this code sits earlier in the file than Breath Bubble's own
-// block - both use it).
-// ---------------------------------------------------------------------
-static const unsigned long BREATH_PHASE_MS = 4000;
-unsigned long petalPhaseStart = 0;
-int petalPhase = 0;
-int petalCount = 0;
-uint16_t petalColor;
-
-void drawPetalCountLabel() {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "Petals grown: %d", petalCount);
-  tft.fillRect(0, 60, 480, 24, COLOR_BG);
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.setTextDatum(TC_DATUM);
-  tft.drawString(buf, 240, 66);
-  tft.setTextDatum(TL_DATUM);
-}
-
-void drawGamePetalScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Petal Count", 20, 8);
-  drawHomeButton();
-  petalColor = tft.color565(230, 180, 200);
-  petalPhaseStart = millis();
-  petalPhase = 0;
-  petalCount = 0;
-  drawPetalCountLabel();
-}
-
-void handleGamePetalTouch(int x, int y) {
-  handleHomeTouch(x, y); // purely automatic otherwise - no tapping needed
-}
-
-void updateGamePetal() {
-  unsigned long elapsed = millis() - petalPhaseStart;
-  if (elapsed >= BREATH_PHASE_MS) {
-    petalPhase++;
-    petalPhaseStart = millis();
-    if (petalPhase >= 4) {
-      petalPhase = 0;
-      // one full breath cycle completed - place a new petal in a
-      // slowly-growing ring pattern
-      float angle = (petalCount % 12) * (2 * PI / 12.0f);
-      int ring = petalCount / 12;
-      float r = 40 + ring * 25;
-      int px = 240 + (int)(cos(angle) * r);
-      int py = 200 + (int)(sin(angle) * r);
-      if (px > 20 && px < 460 && py > 90 && py < 300) {
-        tft.fillCircle(px, py, 8, petalColor);
-        tft.drawCircle(px, py, 8, COLOR_ACCENT);
-        petalCount++;
-        drawPetalCountLabel();
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// Games menu - picks which simple game to play. All games share the
-// same exit pattern (Home button) and, where relevant, the Ripple
-// engine's animated-shape primitives below.
-// ---------------------------------------------------------------------
-const char* GAME_NAMES[10] = {
-  "Ripple Garden", "Breath Bubble", "Still Point", "Color Flow", "Pulse Match",
-  "Zen Garden", "Bubble Pop", "Match Two", "Sand Draw", "Petal Count"
-};
-const Screen GAME_SCREENS[10] = {
-  SCR_GAME_RIPPLE, SCR_GAME_BREATH, SCR_GAME_STILL, SCR_GAME_COLORFLOW, SCR_GAME_PULSE,
-  SCR_GAME_ZEN, SCR_GAME_BUBBLE, SCR_GAME_MATCH, SCR_GAME_SAND, SCR_GAME_PETAL
-};
-Rect gameMenuItemRects[6];
-int gamesMenuPage = 0;
-const int GAMES_PER_PAGE = 6;
-
-// ---------------------------------------------------------------------
-// Breath Bubble - paced box-breathing exercise (inhale/hold/exhale/hold,
-// 4 seconds each phase). No scoring, no failure - purely a visual pace
-// to follow, the circle growing and shrinking with the breath.
-// ---------------------------------------------------------------------
-unsigned long breathPhaseStart = 0;
-int breathPhase = 0; // 0=inhale, 1=hold, 2=exhale, 3=hold
-float breathLastRadius = -1;
-const char* BREATH_PHASE_LABELS[4] = {"Breathe in...", "Hold...", "Breathe out...", "Hold..."};
-
-void drawBreathLabel() {
-  tft.fillRect(0, 60, 480, 30, COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TC_DATUM);
-  tft.drawString(BREATH_PHASE_LABELS[breathPhase], 240, 70);
-  tft.setTextDatum(TL_DATUM);
-}
-
-void drawGameBreathScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Breath Bubble", 20, 8);
-  drawHomeButton();
-  breathPhaseStart = millis();
-  breathPhase = 0;
-  breathLastRadius = -1;
-  drawBreathLabel();
-}
-
-void handleGameBreathTouch(int x, int y) {
-  handleHomeTouch(x, y);
-}
-
-void updateGameBreath() {
-  unsigned long elapsed = millis() - breathPhaseStart;
-  if (elapsed >= BREATH_PHASE_MS) {
-    breathPhase = (breathPhase + 1) % 4;
-    breathPhaseStart = millis();
-    elapsed = 0;
-    drawBreathLabel();
-  }
-  float t = (float)elapsed / (float)BREATH_PHASE_MS; // 0..1 within this phase
-  float minR = 40, maxR = 100, radius;
-  if (breathPhase == 0) radius = minR + (maxR - minR) * t;      // inhale: grow
-  else if (breathPhase == 1) radius = maxR;                     // hold big
-  else if (breathPhase == 2) radius = maxR - (maxR - minR) * t; // exhale: shrink
-  else radius = minR;                                            // hold small
-
-  if (breathLastRadius >= 0) {
-    tft.drawCircle(240, 210, (int)breathLastRadius, COLOR_BG);
-    tft.drawCircle(240, 210, (int)breathLastRadius - 1, COLOR_BG);
-  }
-  tft.drawCircle(240, 210, (int)radius, COLOR_ACCENT);
-  tft.drawCircle(240, 210, (int)radius - 1, COLOR_ACCENT);
-  breathLastRadius = radius;
-}
-
-
-void drawGamesMenuScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Games", 20, 8);
-  drawHomeButton();
-
-  int start = gamesMenuPage * GAMES_PER_PAGE;
-  int colW = 220, rowH = 44, gapX = 20, gapY = 8;
-  for (int i = 0; i < GAMES_PER_PAGE; i++) {
-    int idx = start + i;
-    int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 48 + row * (rowH + gapY), colW, rowH};
-    gameMenuItemRects[i] = r;
-    if (idx < 10) drawButtonFast(r, GAME_NAMES[idx]);
-  }
-  Rect btnGamesPrev = {20, 216, 140, 46};
-  Rect btnGamesBack = {180, 216, 120, 46};
-  Rect btnGamesNext = {320, 216, 140, 46};
-  drawButton(btnGamesPrev, "< Prev");
-  drawButton(btnGamesBack, "Back", COLOR_MUTED);
-  drawButton(btnGamesNext, "Next >");
-}
-
-void handleGamesMenuTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  int start = gamesMenuPage * GAMES_PER_PAGE;
-  for (int i = 0; i < GAMES_PER_PAGE; i++) {
-    int idx = start + i;
-    if (idx < 10 && touchInRect(x, y, gameMenuItemRects[i])) {
-      screen = GAME_SCREENS[idx];
-      return;
-    }
-  }
-  Rect btnGamesPrev = {20, 216, 140, 46};
-  Rect btnGamesBack = {180, 216, 120, 46};
-  Rect btnGamesNext = {320, 216, 140, 46};
-  if (touchInRect(x, y, btnGamesPrev)) {
-    if (gamesMenuPage > 0) gamesMenuPage--;
-    screen = SCR_GAMES_MENU;
-  } else if (touchInRect(x, y, btnGamesNext)) {
-    if ((gamesMenuPage + 1) * GAMES_PER_PAGE < 10) gamesMenuPage++;
-    screen = SCR_GAMES_MENU;
-  } else if (touchInRect(x, y, btnGamesBack)) {
-    screen = SCR_SETTINGS;
-  }
-}
-
-
-// it: spawn something at a touch point, grow/fade it over time, expire
-// it. A bubble popping, a petal blooming, or a fading drawn line are all
-// the same underlying pattern with a different shape and trigger - this
-// is meant as the foundation the other simple games build on, not a
-// one-off.
-// ---------------------------------------------------------------------
-struct Ripple {
-  int x, y;
-  float radius;
-  bool active;
-};
-
-static const int MAX_RIPPLES = 8;
-Ripple ripples[MAX_RIPPLES];
-static const float RIPPLE_MAX_RADIUS = 60.0f;
-static const float RIPPLE_GROWTH_PER_FRAME = 1.5f;
-
-// Linear blend between two RGB565 colors, channel by channel - used to
-// fade a ripple's ring color toward the background as it grows, since
-// this display has no real alpha transparency to draw with.
-uint16_t blendColor565(uint16_t c1, uint16_t c2, float t) {
-  if (t < 0) t = 0;
-  if (t > 1) t = 1;
-  uint8_t r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
-  uint8_t r2 = (c2 >> 11) & 0x1F, g2 = (c2 >> 5) & 0x3F, b2 = c2 & 0x1F;
-  uint8_t r = r1 + (uint8_t)((r2 - r1) * t);
-  uint8_t g = g1 + (uint8_t)((g2 - g1) * t);
-  uint8_t b = b1 + (uint8_t)((b2 - b1) * t);
-  return (r << 11) | (g << 5) | b;
-}
-
-void spawnRipple(int x, int y) {
-  // Reuse the first free slot; if every slot is already active, steal
-  // the first one rather than silently dropping the new tap.
-  for (int i = 0; i < MAX_RIPPLES; i++) {
-    if (!ripples[i].active) {
-      ripples[i].x = x;
-      ripples[i].y = y;
-      ripples[i].radius = 0;
-      ripples[i].active = true;
-      return;
-    }
-  }
-  ripples[0].x = x;
-  ripples[0].y = y;
-  ripples[0].radius = 0;
-  ripples[0].active = true;
-}
-
-void drawGameRippleScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Ripple Garden", 20, 8);
-  drawHomeButton();
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap anywhere to make ripples", 20, 40);
-  for (int i = 0; i < MAX_RIPPLES; i++) ripples[i].active = false; // fresh start each time this screen is entered
-}
-
-void handleGameRippleTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) return;
-  if (y < 60) return; // keep the title/instructions area clear of ripples
-  spawnRipple(x, y);
-}
-
-// Called every loop() iteration while this screen is active. Erases
-// each ripple's ring at its current radius before redrawing it at the
-// new, larger radius - touching only those specific pixels rather than
-// clearing the whole screen, so the animation is smooth instead of
-// flashing (the same lesson learned from the countdown-timer flash
-// regression earlier).
-void updateGameRipples() {
-  for (int i = 0; i < MAX_RIPPLES; i++) {
-    if (!ripples[i].active) continue;
-    if (ripples[i].radius > 0) {
-      tft.drawCircle(ripples[i].x, ripples[i].y, (int)ripples[i].radius, COLOR_BG);
-    }
-    ripples[i].radius += RIPPLE_GROWTH_PER_FRAME;
-    if (ripples[i].radius >= RIPPLE_MAX_RADIUS) {
-      ripples[i].active = false;
-      continue;
-    }
-    float t = ripples[i].radius / RIPPLE_MAX_RADIUS;
-    uint16_t ringColor = blendColor565(COLOR_ACCENT, COLOR_BG, t);
-    tft.drawCircle(ripples[i].x, ripples[i].y, (int)ripples[i].radius, ringColor);
-  }
-}
-
-
 void drawSoundscapesScreen() {
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Soundscapes", 20, 8);
+  tft.drawString(soundscapesOrigin == SCR_RUN ? "Pick a Sound" : "Soundscapes", 20, 8);
   drawHomeButton();
 
   int count = sdmedia_soundscapeCount();
@@ -3042,32 +2305,42 @@ void drawSoundscapesScreen() {
     tft.setFreeFont(FONT_SM);
     tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 460, 16);
+    tft.drawString(pageBuf, 355, 16);
     tft.setTextDatum(TL_DATUM);
   }
 
+  int highlighted = (soundscapesOrigin == SCR_RUN) ? sessionSoundscapeIndex : previewSoundscapeIndex;
   int start = soundscapesPage * SOUNDSCAPES_PER_PAGE;
   int colW = 220, rowH = 44, gapX = 20, gapY = 8;
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 48 + row * (rowH + gapY), colW, rowH};
+    Rect r = {20 + col * (colW + gapX), 56 + row * (rowH + gapY), colW, rowH};
     soundscapeItemRects[i] = r;
     if (idx < count) {
-      bool playing = audio_isSoundscapePlaying() && nowPlayingSoundscapeIndex == idx;
-      drawButtonFast(r, sdmedia_soundscapeName(idx), playing ? COLOR_GOOD : 0xFFFF, playing);
+      char name[32];
+      prettySoundName(idx, name, sizeof(name));
+      bool on = (idx == highlighted);
+      drawButtonFast(r, name, on ? COLOR_GOOD : 0xFFFF, on);
     }
   }
+  if (soundscapesOrigin != SCR_RUN) {
+    tft.setFreeFont(FONT_SM);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString("Tap to preview, tap again to stop.", 20, 272);
+  }
   drawButton(btnSndPrevPage, "< Prev");
-  const char* sndBackLabel = (audio_isSoundscapePlaying() && soundscapesOrigin != SCR_RUN) ? "Stop & Back" : "Back";
-  drawButton(btnSndBack, sndBackLabel, COLOR_MUTED);
+  drawButton(btnSndBack, "Back", COLOR_MUTED);
   drawButton(btnSndNextPage, "Next >");
 }
 
+void stopPreview() { previewSoundscapeIndex = -1; }
+
 void handleSoundscapesTouch(int x, int y) {
   if (handleHomeTouch(x, y)) {
-    audio_stopSoundscape();
-    audio_setEnabled(btAudioOn); // restore to whatever the Run screen's own toggle says, not left stuck on
+    stopPreview();
+    if (soundscapesOrigin == SCR_RUN) screen = SCR_RUN; // never abandon a running session via Home here
     return;
   }
   int count = sdmedia_soundscapeCount();
@@ -3075,49 +2348,22 @@ void handleSoundscapesTouch(int x, int y) {
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
     int idx = start + i;
     if (idx >= count || !touchInRect(x, y, soundscapeItemRects[i])) continue;
-
-    if (audio_isSoundscapePlaying() && nowPlayingSoundscapeIndex == idx) {
-      audio_stopSoundscape();
-      audio_setEnabled(btAudioOn); // restore to whatever the Run screen's own toggle says, not left stuck on
-      nowPlayingSoundscapeIndex = -1;
-      screen = SCR_SOUNDSCAPES;
-      return;
+    if (soundscapesOrigin == SCR_RUN) {
+      sessionSoundscapeIndex = idx;
+      sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
+      saveSetupInfo();
+      screen = SCR_RUN;
+    } else {
+      previewSoundscapeIndex = (previewSoundscapeIndex == idx) ? -1 : idx;
     }
-    audio_stopSoundscape();
-    audio_startSoundscape(sdmedia_soundscapePath(idx));
-    nowPlayingSoundscapeIndex = idx;
-    if (!audio_isEnabled()) {
-      if (audioUsingBluetooth()) {
-        tft.fillScreen(COLOR_BG);
-        tft.setFreeFont(FONT_LG);
-        tft.setTextColor(TFT_WHITE, COLOR_BG);
-        tft.setTextDatum(MC_DATUM);
-        tft.drawString("Connecting to speaker...", 240, 140);
-        tft.setFreeFont(FONT_SM);
-        tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-        tft.drawString("This can take up to a minute.", 240, 175);
-      }
-      // The local wired speaker has no real "connecting" delay - just
-      // enabling the amp - so no need for a wait message on that path.
-      audio_setEnabled(true);
-    }
-    screen = SCR_SOUNDSCAPES;
     return;
   }
   if (touchInRect(x, y, btnSndPrevPage)) {
     if (soundscapesPage > 0) soundscapesPage--;
-    screen = SCR_SOUNDSCAPES;
   } else if (touchInRect(x, y, btnSndNextPage)) {
     if ((soundscapesPage + 1) * SOUNDSCAPES_PER_PAGE < count) soundscapesPage++;
-    screen = SCR_SOUNDSCAPES;
   } else if (touchInRect(x, y, btnSndBack)) {
-    if (soundscapesOrigin != SCR_RUN) {
-      // Only stop it when returning to standalone browsing (Settings) -
-      // returning to an active session should keep it playing, since
-      // picking one from mid-session is the whole point of this path.
-      audio_stopSoundscape();
-      audio_setEnabled(btAudioOn); // restore to whatever the Run screen's own toggle says, not left stuck on
-    }
+    stopPreview();
     screen = soundscapesOrigin;
   }
 }
@@ -3136,47 +2382,36 @@ int listCount() {
 
 void getListLabel(int posInCategory, char* buf, size_t bufLen) {
   int realIdx = catIndices[posInCategory];
-  // Just the name, not "(XX Hz)" too - several of the current preset
-  // names are long enough on their own that adding the frequency here
-  // caused real truncation/cut-off text. Frequency shows clearly on the
-  // very next screen (Run) right after tapping, so nothing is lost.
   snprintf(buf, bufLen, "%s", BASE_PRESETS[realIdx].name);
 }
 
-// 2-column x 3-row grid, same pattern as the Category screen.
+// 2-column x 3-row grid, same pattern as the Category screen. Plain
+// background (no splash) - this screen changes on every page flip.
 void drawListScreen() {
-  // Same background treatment as Category/Welcome/Run - this screen
-  // only redraws on navigation/pagination, never continuously, so it's
-  // just as safe as those.
-  if (!sdmedia_showSplash()) {
-    tft.fillScreen(COLOR_BG);
-  }
+  tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], 20, 8);
+  drawFittedText(20, 8, 330, viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], FONT_XL, TFT_WHITE, COLOR_BG);
   drawHomeButton();
 
   int total = listCount();
   int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
   if (totalPages > 1) {
-    // Next to the title, same placement as the Harmonics screen's page
-    // indicator - avoids squeezing it into the tight gap near the nav
-    // buttons, which was overlapping them before.
     char pageBuf[20];
     snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", listPage + 1, totalPages);
     tft.setFreeFont(FONT_SM);
     tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 460, 16);
     tft.setTextDatum(TL_DATUM);
+    tft.drawString(pageBuf, 20, 272);
   }
 
   if (total == 0 && viewingFavorites) {
     tft.setFreeFont(FONT_SM);
     tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.drawString("No favorites yet - tap the star on", 20, 48);
-    tft.drawString("a preset's Run screen to add one.", 20, 70);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString("No favorites yet - tap the star on", 20, 56);
+    tft.drawString("a preset's Run screen to add one.", 20, 78);
   }
   int start = listPage * ITEMS_PER_PAGE;
   char buf[64];
@@ -3184,7 +2419,7 @@ void drawListScreen() {
   for (int i = 0; i < ITEMS_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 48 + row * (rowH + gapY), colW, rowH};
+    Rect r = {20 + col * (colW + gapX), 56 + row * (rowH + gapY), colW, rowH};
     itemRects[i] = r;
     if (idx < total) {
       getListLabel(idx, buf, sizeof(buf));
@@ -3203,7 +2438,7 @@ void openRunScreenForIndex(int posInCategory) {
   selFreq = BASE_PRESETS[realIdx].freqHz;
   selWave = BASE_PRESETS[realIdx].wave;
   selCategoryName = CATEGORY_NAMES[BASE_PRESETS[realIdx].category];
-  pendingSequenceIndex = -1; // this is a normal preset pick, not a Sequence
+  pendingSequenceIndex = -1;
   runScreenOrigin = SCR_LIST;
   screen = isWellnessCenter ? SCR_CLIENT_CONFIRM : SCR_RUN;
 }
@@ -3221,10 +2456,8 @@ void handleListTouch(int x, int y) {
   }
   if (touchInRect(x, y, btnPrevPage)) {
     if (listPage > 0) listPage--;
-    screen = SCR_LIST; // force redraw
   } else if (touchInRect(x, y, btnNextPage)) {
     if ((listPage + 1) * ITEMS_PER_PAGE < total) listPage++;
-    screen = SCR_LIST;
   } else if (touchInRect(x, y, btnBackFromList)) {
     screen = SCR_CATEGORY;
   }
@@ -3232,45 +2465,31 @@ void handleListTouch(int x, int y) {
 
 // ---------------------------------------------------------------------
 // Screen: running / detail view
+//   Left column : name, frequency, Start/Pause, Sound, Pick Sound, Stop & Back
+//   Right column: Power, Session timer, Volume, sound-output status
 // ---------------------------------------------------------------------
-Rect btnStartStop   = {20, 100, 220, 44};
-Rect btnFavToggle   = {145, 28, 95, 36};
-Rect btnBtAudio     = {20, 152, 220, 44};
-Rect btnBackFromRun = {20, 204, 220, 44};
-Rect btnRunSoundscape = {20, 256, 220, 44};
+Rect btnStartStop     = {20, 100, 220, 44};
+Rect btnFavToggle     = {145, 28, 95, 36};
+Rect btnSoundMode     = {20, 152, 220, 44};
+Rect btnPickSound     = {20, 204, 220, 44};
+Rect btnBackFromRun   = {20, 256, 220, 44};
 
-Stepper powerStepper  = {"Power",  260, 48, 10, 1, 100, 1, formatPercentValue}; // y=48 clears the enlarged Home button (ends y=44)
-Stepper timerStepper  = {"Session timer", 260, 130, 30, 0, 60, 5, formatTimerValue};
-Stepper volumeStepper = {"BT Volume", 260, 220, 60, 0, 100, 5, formatPercentValue};
+Stepper powerStepper  = {"Power",  260, 70, 10, 1, 100, 1, formatPercentValue};
+Stepper timerStepper  = {"Session timer", 260, 142, 30, 0, 60, 5, formatTimerValue};
+Stepper volumeStepper = {"Volume", 260, 214, 60, 0, 100, 5, formatPercentValue};
 
-// Session auto-stop bookkeeping
 unsigned long sessionStartMillis = 0;
 bool sessionTimerArmed = false;
 
-// Pause/Resume - the coil output actually stops while paused (same as a
-// full stop), but sessionStartMillis and the active program's own step
-// timing are preserved so resuming continues from where it left off
-// rather than restarting. Every place that computes elapsed session time
-// uses sessionEffectiveMillis() instead of raw millis(), so the
-// countdown, auto-stop, and logged duration all correctly freeze while
-// paused instead of continuing to advance in the background.
 bool sessionPaused = false;
 unsigned long pauseStartMillis = 0;
-float pausedFreq = 0; // captured before waveform_stop() (which zeroes its own internal frequency), so Resume knows what to restart at
+float pausedFreq = 0;
 
 unsigned long sessionEffectiveMillis() {
   return sessionPaused ? pauseStartMillis : millis();
 }
 
-// ---------------------------------------------------------------------
-// Program execution (Sequences: ramps and holds through multiple stages) - a
-// multi-step sequence that runs on top of the same waveform engine used
-// for single-frequency presets. Ramp interpolation is throttled to once
-// per second, since this is a magnetic-field application, not audio -
-// no need for anything faster, and it's much cheaper on the sine mode's
-// table rebuild.
 bool programActive = false;
-// pendingSequenceIndex declared earlier (near the other mode flags) - see note there.
 Program currentProgram;
 int programStepIndex = 0;
 unsigned long programStepStartMillis = 0;
@@ -3292,7 +2511,7 @@ void stopProgram() {
 }
 
 void updateProgram() {
-  if (!programActive || sessionPaused) return; // frozen entirely while paused - no step timing advances
+  if (!programActive || sessionPaused) return;
   if (millis() - lastProgramUpdateMillis < 1000) return;
   lastProgramUpdateMillis = millis();
 
@@ -3303,9 +2522,7 @@ void updateProgram() {
   if (s.kind == STEP_RAMP) {
     float t = (float)elapsedMs / (float)durMs;
     if (t > 1.0f) t = 1.0f;
-    float freqNow = programStepStartFreq + (s.freqHz - programStepStartFreq) * t;
-    waveform_setFrequency(freqNow);
-    audio_setTargetFrequency(freqNow); // audio tone follows along too, safely capped - see DIRECT_TONE_MAX_HZ in bt_audio.cpp
+    waveform_setFrequency(programStepStartFreq + (s.freqHz - programStepStartFreq) * t);
   }
 
   if (elapsedMs >= durMs) {
@@ -3317,168 +2534,215 @@ void updateProgram() {
     }
     ProgramStep& next = currentProgram.steps[programStepIndex];
     programStepStartFreq = waveform_currentFreq();
-    if (next.kind == STEP_HOLD) {
-      waveform_setFrequency(next.freqHz);
-      audio_setTargetFrequency(next.freqHz);
-    }
+    if (next.kind == STEP_HOLD) waveform_setFrequency(next.freqHz);
     programStepStartMillis = millis();
   }
 }
 
+// The frequency actually on the coil right now (follows Sequence ramps).
+float liveFrequency() {
+  if (waveform_isRunning()) return waveform_currentFreq();
+  if (sessionPaused) return pausedFreq;
+  return selFreq;
+}
+
+void formatFreq(float f, char* buf, size_t len) {
+  if (f == (int)f) snprintf(buf, len, "%d Hz", (int)f);
+  else snprintf(buf, len, "%.2f Hz", f);
+}
+
+// ---------------------------------------------------------------------
+// Keeps the audio engine in step with the session. Called every loop():
+// audio plays while the coil is running (and during a Settings preview),
+// the tone always tracks the live coil frequency, and the soundscape is
+// whichever one this session has selected.
+// ---------------------------------------------------------------------
+void syncAudio() {
+  AudioSource src = AUDIO_SRC_OFF;
+  int scapeIdx = -1;
+  bool sessionOn = waveform_isRunning() && !sessionPaused;
+
+  if (sessionOn) {
+    src = sessionSoundMode;
+    scapeIdx = sessionSoundscapeIndex;
+    if (src == AUDIO_SRC_SOUNDSCAPE && scapeIdx < 0) src = AUDIO_SRC_TONE;
+  } else if (screen == SCR_SOUNDSCAPES && previewSoundscapeIndex >= 0) {
+    src = AUDIO_SRC_SOUNDSCAPE;
+    scapeIdx = previewSoundscapeIndex;
+  }
+
+  if (src == AUDIO_SRC_SOUNDSCAPE) audio_setSoundscapeFile(sdmedia_soundscapePath(scapeIdx));
+  audio_setToneFrequency(liveFrequency());
+  audio_setSource(src);
+}
+
+// Session setup that has to happen once each time a NEW preset/sequence/
+// custom frequency is opened: pick the matching default soundscape.
+const char* preparedForName = nullptr;
+float preparedForFreq = -1;
+
+void prepareSessionAudioIfNew() {
+  if (selName == preparedForName && selFreq == preparedForFreq) return;
+  preparedForName = selName;
+  preparedForFreq = selFreq;
+  sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
+}
+
+const char* soundModeLabel(char* buf, size_t len) {
+  if (sessionSoundMode == AUDIO_SRC_OFF) {
+    snprintf(buf, len, "Sound: Off");
+  } else if (sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && sessionSoundscapeIndex >= 0) {
+    char name[24];
+    prettySoundName(sessionSoundscapeIndex, name, sizeof(name));
+    snprintf(buf, len, "Sound: %s", name);
+  } else {
+    snprintf(buf, len, "Sound: Tone");
+  }
+  return buf;
+}
+
+void outputStatusText(char* buf, size_t len) {
+  if (audioUsingBluetooth()) {
+    snprintf(buf, len, audio_btIsConnected() ? "BT: connected" : "BT: connecting...");
+  } else {
+    snprintf(buf, len, audio_speakerReady() ? "Out: onboard speaker" : "Speaker driver failed");
+  }
+}
+
+// Small targeted redraws - called once a second. Each piece only repaints
+// when its text actually changed, so nothing on screen flickers.
+char lastCountdownText[24] = "";
+char lastFreqText[32] = "";
+char lastStatusText[32] = "";
+
 void drawCountdownOnly() {
-  // Small, targeted redraw of just the countdown text - clears only its
-  // own area first, not the whole screen. Used for the once-a-second
-  // live update so the display doesn't visibly flash every second (a
-  // real regression from calling the full drawRunScreen() for this).
-  tft.fillRect(18, 82, 200, 20, COLOR_BG);
+  char timeBuf[24] = "";
   if (sessionTimerArmed && (waveform_isRunning() || sessionPaused)) {
     unsigned long elapsedSec = (sessionEffectiveMillis() - sessionStartMillis) / 1000UL;
     long remainingSec = (long)timerMinutes * 60 - (long)elapsedSec;
     if (remainingSec < 0) remainingSec = 0;
-    char timeBuf[24];
     snprintf(timeBuf, sizeof(timeBuf), sessionPaused ? "Paused: %ld:%02ld" : "Time left: %ld:%02ld",
              remainingSec / 60, remainingSec % 60);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString(timeBuf, 20, 88);
+  } else if (sessionPaused) {
+    snprintf(timeBuf, sizeof(timeBuf), "Paused");
+  }
+  if (strcmp(timeBuf, lastCountdownText) != 0) {
+    tft.fillRect(258, 262, 212, 24, COLOR_BG);
+    drawFittedText(260, 266, 210, timeBuf, FONT_SM, COLOR_ACCENT, COLOR_BG);
+    strcpy(lastCountdownText, timeBuf);
   }
 
-  // Live local-speaker diagnostic, right here on the Run screen - the
-  // Welcome screen's version of this requires leaving the session to
-  // check, and leaving (via Home) stops the session and disables audio
-  // as part of its normal behavior, which was quietly invalidating that
-  // test the whole time. This updates once a second, same as the
-  // countdown above, so it can be watched live without ever leaving.
-  tft.fillRect(260, 270, 200, 20, COLOR_BG);
-  if (!audioUsingBluetooth()) {
-    char diagBuf[40];
-    snprintf(diagBuf, sizeof(diagBuf), "Spkr: en=%d wr=%lu fail=%lu",
-             localaudio_isEnabled() ? 1 : 0, localaudio_totalSamplesWritten(), localaudio_totalWriteFailures());
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString(diagBuf, 260, 270);
+  char freqBuf[32], f[16];
+  formatFreq(liveFrequency(), f, sizeof(f));
+  if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%s (%d/%d)", f, programStepIndex + 1, currentProgram.stepCount);
+  else snprintf(freqBuf, sizeof(freqBuf), "%s", f);
+  if (strcmp(freqBuf, lastFreqText) != 0) {
+    tft.fillRect(18, 38, 124, 30, COLOR_BG);
+    drawFittedText(20, 42, 122, freqBuf, FONT_LG, TFT_WHITE, COLOR_BG);
+    strcpy(lastFreqText, freqBuf);
+  }
+
+  char status[32];
+  outputStatusText(status, sizeof(status));
+  if (strcmp(status, lastStatusText) != 0) {
+    tft.fillRect(258, 288, 212, 24, COLOR_BG);
+    drawFittedText(260, 292, 210, status, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+    strcpy(lastStatusText, status);
   }
 }
 
-// Two-column landscape layout: left column is info + Start/Stop + BT
-// toggle + Back, right column is the three steppers.
 void drawRunScreen() {
-  // Same background treatment as Category/Welcome - falls back to solid
-  // color with no SD card. Confirmed safe to add here too: the once-
-  // per-second countdown update (drawCountdownOnly()) only ever touches
-  // its own small area, never the whole screen, so this draws once on
-  // entry and stays static rather than needing to redraw repeatedly.
-  // Every text element here already specifies an opaque background
-  // color when drawn, which gives each one its own solid backing
-  // automatically - no separate backing rectangles needed the way the
-  // Welcome screen's dense disclaimer block needed one.
-  if (!sdmedia_showSplash()) {
-    tft.fillScreen(COLOR_BG);
-  }
+  prepareSessionAudioIfNew();
+  drawSplashBackground();
   drawHomeButton();
 
+  // Dark panels behind the text areas keep everything readable while the
+  // splash still shows around them. (Free fonts don't paint their own
+  // background, so text straight over the image is hard to read.)
+  tft.fillRoundRect(8, 2, 246, 94, 12, COLOR_BG);    // title / frequency / category
+  tft.fillRoundRect(250, 46, 226, 270, 12, COLOR_BG); // steppers + status
+
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  // Long preset names (several of the current general-wellness names run
-  // longer than the originals did) can exceed FONT_LG's width here even
-  // with drawFittedText's truncation, which read as text getting cut
-  // off. Drop to FONT_SM instead for anything that doesn't fit at the
-  // normal size - shows the full name rather than truncating it.
-  const GFXfont* titleFont = (tft.textWidth(selName) <= 210) ? FONT_LG : FONT_SM;
-  drawFittedText(20, 8, 210, selName, titleFont, TFT_WHITE, COLOR_BG);
+  const GFXfont* titleFont = (tft.textWidth(selName) <= 120) ? FONT_LG : FONT_SM;
+  drawFittedText(20, 8, 120, selName, titleFont, TFT_WHITE, COLOR_BG);
 
   char buf[48];
-  if (programActive) {
-    snprintf(buf, sizeof(buf), "%.0f Hz (step %d/%d)", waveform_currentFreq(),
-             programStepIndex + 1, currentProgram.stepCount);
-  } else {
-    snprintf(buf, sizeof(buf), "%.0f Hz", selFreq);
-  }
-  tft.drawString(buf, 20, 40);
+  snprintf(buf, sizeof(buf), "%s - %s", selWave == WAVE_SQUARE ? "Square" : "Sine", selCategoryName);
+  drawFittedText(20, 72, 225, buf, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
 
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  snprintf(buf, sizeof(buf), "%s - %s",
-           selWave == WAVE_SQUARE ? "Square" : "Sine", selCategoryName);
-  tft.drawString(buf, 20, 70);
-
+  // force the once-a-second pieces to repaint on this fresh screen
+  strcpy(lastCountdownText, "\x01");
+  lastFreqText[0] = 0;
+  lastStatusText[0] = 0;
   refreshRunControls();
 }
 
-// Everything on this screen that can actually change from a touch while
-// staying on SCR_RUN - the Fav star, Start/Pause/Resume, Speaker/BT
-// Audio, the soundscape button, and the three steppers. Deliberately
-// does NOT touch the background, title, or the Square/Sine-category
-// line, none of which change from a touch here. A real, confirmed bug
-// lived in loop()'s old blanket "redraw the whole screen after any
-// touch" mechanism - harmless with a fast solid fill, but a visibly
-// slow, flashy full redraw once this screen got a background image.
-// This is what loop() now calls instead for SCR_RUN.
+// Everything that can change from a tap while staying on the Run screen.
 void refreshRunControls() {
   bool isFav = (selectedIndex >= 0) && favoriteBits[selectedIndex];
-  drawButtonFast(btnFavToggle, isFav ? "* ON" : "* Fav", isFav ? COLOR_WARN : COLOR_MUTED);
-
-  drawCountdownOnly(); // same function the once-a-second periodic update uses - keeps both paths consistent, and shows the countdown immediately on entry/START rather than waiting a full second for the next periodic tick
+  if (selectedIndex >= 0) drawButtonFast(btnFavToggle, isFav ? "* ON" : "* Fav", isFav ? COLOR_WARN : COLOR_MUTED);
 
   bool running = waveform_isRunning();
   const char* startLabel = sessionPaused ? "RESUME"
                           : running ? "PAUSE"
-                          : (pendingSequenceIndex >= 0 ? "START (Harmonics)" : "START");
+                          : (pendingSequenceIndex >= 0 ? "START Sequence" : "START");
   uint16_t startColor = sessionPaused ? COLOR_GOOD : running ? COLOR_WARN : COLOR_GOOD;
   drawButton(btnStartStop, startLabel, startColor);
 
-  const char* audioBtnLabel = audioUsingBluetooth()
-    ? (btAudioOn ? "BT Audio: ON" : "BT Audio: OFF")
-    : (btAudioOn ? "Speaker: ON" : "Speaker: OFF"); // shortened from "Speaker Audio: ON/OFF" - that was long enough to trigger truncation, which cut off the ON/OFF status itself (the most important word) rather than the label
-  drawButton(btnBtAudio, audioBtnLabel, 0xFFFF, btAudioOn);
-  drawButton(btnBackFromRun, "Stop & Back", COLOR_MUTED);
+  char sndLabel[40];
+  drawButton(btnSoundMode, soundModeLabel(sndLabel, sizeof(sndLabel)), 0xFFFF, sessionSoundMode != AUDIO_SRC_OFF);
 
-  if (sdmedia_isAvailable() && sdmedia_soundscapeCount() > 0) {
-    char sndLabel[48];
-    if (audio_isSoundscapePlaying()) {
-      snprintf(sndLabel, sizeof(sndLabel), "Stop: %s", sdmedia_soundscapeName(nowPlayingSoundscapeIndex));
-    } else {
-      snprintf(sndLabel, sizeof(sndLabel), "Choose Soundscape");
-    }
-    drawButton(btnRunSoundscape, sndLabel, COLOR_MUTED, audio_isSoundscapePlaying());
+  if (sdmedia_soundscapeCount() > 0) {
+    drawButton(btnPickSound, "Pick Soundscape", COLOR_MUTED);
   }
+  drawButton(btnBackFromRun, "Stop & Back", COLOR_MUTED);
 
   powerStepper.value = powerDisplay;
   timerStepper.value = timerMinutes;
   volumeStepper.value = volumePercent;
-  volumeStepper.label = audioUsingBluetooth() ? "BT Volume" : "Speaker Volume"; // was stuck on "BT Volume" even in speaker mode - real bug, now dynamic
+  volumeStepper.label = audioUsingBluetooth() ? "BT Volume" : "Speaker Volume";
+  tft.fillRect(258, volumeStepper.y - 24, 212, 20, COLOR_BG); // label length changes between modes
   drawStepper(powerStepper);
   drawStepper(timerStepper);
   drawStepper(volumeStepper);
+
+  drawCountdownOnly();
 }
 
+void endSession() {
+  if (waveform_isRunning() || sessionPaused) {
+    int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
+    addLogEntry(selName, selFreq, mins);
+  }
+  stopProgram();
+  waveform_stop();
+  sessionTimerArmed = false;
+  sessionPaused = false;
+}
+
+// Off -> Tone -> Soundscape (if the card has any) -> Off ...
+void cycleSoundMode() {
+  if (sessionSoundMode == AUDIO_SRC_OFF) sessionSoundMode = AUDIO_SRC_TONE;
+  else if (sessionSoundMode == AUDIO_SRC_TONE && sdmedia_soundscapeCount() > 0) {
+    sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
+    if (sessionSoundscapeIndex < 0) sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
+  }
+  else sessionSoundMode = AUDIO_SRC_OFF;
+  saveSetupInfo();
+}
 
 void handleRunTouch(int x, int y) {
   if (handleHomeTouch(x, y)) {
-    if (waveform_isRunning() || sessionPaused) {
-      int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
-      addLogEntry(selName, selFreq, mins);
-    }
-    stopProgram();
-    waveform_stop();
-    sessionTimerArmed = false;
-    sessionPaused = false;
-    btAudioOn = false;
-    audio_setEnabled(false);
+    endSession();
     return;
   }
-  if (touchInRect(x, y, btnFavToggle) && selectedIndex >= 0) {
+  if (selectedIndex >= 0 && touchInRect(x, y, btnFavToggle)) {
     setFavorite(selectedIndex, !favoriteBits[selectedIndex]);
-    screen = SCR_RUN;
     return;
   }
   if (handleStepperTouch(powerStepper, x, y)) {
     powerDisplay = powerStepper.value;
     waveform_setIntensity(actualIntensityPercent());
-    screen = SCR_RUN;
     return;
   }
   if (handleStepperTouch(timerStepper, x, y)) {
@@ -3487,37 +2751,29 @@ void handleRunTouch(int x, int y) {
       sessionStartMillis = millis();
       sessionTimerArmed = (timerMinutes > 0);
     }
-    screen = SCR_RUN;
     return;
   }
   if (handleStepperTouch(volumeStepper, x, y)) {
     volumePercent = volumeStepper.value;
     audio_setVolume((uint8_t)volumePercent);
-    screen = SCR_RUN;
+    saveSetupInfo();
     return;
   }
   if (touchInRect(x, y, btnStartStop)) {
     if (sessionPaused) {
-      // Resume - shift the reference timestamps forward by however long
-      // we were paused, so elapsed-time math picks up right where it
-      // left off instead of counting the paused time as active.
       unsigned long pauseDuration = millis() - pauseStartMillis;
       sessionStartMillis += pauseDuration;
       if (programActive) programStepStartMillis += pauseDuration;
       sessionPaused = false;
       waveform_start(pausedFreq, selWave, actualIntensityPercent());
     } else if (waveform_isRunning()) {
-      // Pause - not a full stop. Halts the coil output but deliberately
-      // leaves sessionStartMillis/programStepIndex/etc. untouched so
-      // Resume can continue cleanly rather than restarting. Frequency
-      // is captured first since waveform_stop() zeroes it internally.
       pausedFreq = waveform_currentFreq();
       sessionPaused = true;
       pauseStartMillis = millis();
       waveform_stop();
     } else if (pendingSequenceIndex >= 0) {
       startProgram(SEQUENCES[pendingSequenceIndex]);
-      pendingSequenceIndex = -1; // one-shot
+      pendingSequenceIndex = -1;
       sessionStartMillis = millis();
       sessionTimerArmed = (timerMinutes > 0);
     } else {
@@ -3525,53 +2781,62 @@ void handleRunTouch(int x, int y) {
       sessionStartMillis = millis();
       sessionTimerArmed = (timerMinutes > 0);
     }
-    screen = SCR_RUN;
-  } else if (touchInRect(x, y, btnBtAudio)) {
-    btAudioOn = !btAudioOn;
-    if (btAudioOn && audioUsingBluetooth()) {
-      // The actual connect call blocks for a while (can take 30-60+
-      // seconds doing a fresh name scan) - show feedback immediately so
-      // this doesn't look like a freeze while it works. The local wired
-      // speaker has no equivalent delay, so no message needed there.
-      tft.fillScreen(COLOR_BG);
-      tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Connecting to speaker...", 240, 140);
-      tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-      tft.drawString("This can take up to a minute.", 240, 175);
-    }
-    audio_setTargetFrequency(selFreq);
-    audio_setVolume((uint8_t)volumePercent);
-    audio_setEnabled(btAudioOn);
-    screen = SCR_RUN;
-  } else if (sdmedia_isAvailable() && sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnRunSoundscape)) {
-    if (audio_isSoundscapePlaying()) {
-      // Direct stop, right from the session - no need to navigate back
-      // to the Soundscapes picker just to turn it off again.
-      audio_stopSoundscape();
-      audio_setEnabled(btAudioOn); // restore to whatever the Run screen's own toggle says, not left stuck on
-      nowPlayingSoundscapeIndex = -1;
-      screen = SCR_RUN;
-    } else {
-      // Doesn't stop the session - the coil keeps running throughout,
-      // this just navigates to pick a soundscape and comes right back.
-      soundscapesOrigin = SCR_RUN;
-      screen = SCR_SOUNDSCAPES;
-    }
-  } else if (touchInRect(x, y, btnBackFromRun)) {
-    if (waveform_isRunning() || sessionPaused) {
-      int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
-      addLogEntry(selName, selFreq, mins);
-    }
-    stopProgram();
-    waveform_stop();
-    sessionTimerArmed = false;
-    sessionPaused = false;
-    btAudioOn = false;
-    audio_setEnabled(false);
+    return;
+  }
+  if (touchInRect(x, y, btnSoundMode)) {
+    cycleSoundMode();
+    return;
+  }
+  if (sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnPickSound)) {
+    soundscapesOrigin = SCR_RUN;
+    if (sessionSoundscapeIndex >= 0) soundscapesPage = sessionSoundscapeIndex / SOUNDSCAPES_PER_PAGE;
+    screen = SCR_SOUNDSCAPES; // the session keeps running while picking
+    return;
+  }
+  if (touchInRect(x, y, btnBackFromRun)) {
+    endSession();
     screen = runScreenOrigin;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Screen drawing dispatch
+// ---------------------------------------------------------------------
+void drawScreen(Screen s) {
+  switch (s) {
+    case SCR_WELCOME:            drawWelcomeScreen(); break;
+    case SCR_SETUP_MODE:         drawSetupModeScreen(); break;
+    case SCR_SETUP_LOGIN_CHOICE: drawSetupLoginChoiceScreen(); break;
+    case SCR_TEXT_ENTRY:         drawTextEntryScreen(); break;
+    case SCR_CATEGORY:           drawCategoryScreen(); break;
+    case SCR_LIST:               drawListScreen(); break;
+    case SCR_RUN:                drawRunScreen(); break;
+    case SCR_SETTINGS:           drawSettingsScreen(); break;
+    case SCR_PIN:                drawPinScreen(); break;
+    case SCR_LOG:                drawLogScreen(); break;
+    case SCR_UPDATE:             drawUpdateScreen(); break;
+    case SCR_CLIENT_CONFIRM:     drawClientConfirmScreen(); break;
+    case SCR_BT_SCAN:            drawBtScanScreen(); break;
+    case SCR_CUSTOM_FREQ:        drawCustomFreqScreen(); break;
+    case SCR_PERSON_PICKER:      drawPersonPickerScreen(); break;
+    case SCR_MANAGE_PEOPLE:      drawManagePeopleScreen(); break;
+    case SCR_SEQUENCES:          drawSequencesScreen(); break;
+    case SCR_SOUNDSCAPES:        drawSoundscapesScreen(); break;
+    case SCR_WIFI_SETUP:         drawWifiSetupScreen(); break;
+  }
+}
+
+// After a tap that kept us on the same screen: repaint only what can
+// change. Screens that are cheap (plain background) just redraw fully;
+// the splash-background screens only touch their controls.
+void refreshScreen(Screen s) {
+  switch (s) {
+    case SCR_WELCOME:  refreshWelcomeCheckbox(); break;
+    case SCR_RUN:      refreshRunControls(); break;
+    case SCR_CATEGORY: break; // only the hidden stats panel changes, tracked separately
+    case SCR_LIST: case SCR_SEQUENCES: case SCR_LOG: case SCR_PERSON_PICKER: case SCR_WIFI_SETUP:
+      break;          // page changes are tracked separately; nothing else changes on tap
+    default:           drawScreen(s); break;
   }
 }
 
@@ -3579,10 +2844,10 @@ void handleRunTouch(int x, int y) {
 // Setup / loop
 // ---------------------------------------------------------------------
 Screen lastDrawnScreen = SCR_WELCOME;
+bool fullRedrawRequested = true; // first loop pass draws the Welcome screen
 int lastDrawnPage = -1;
 int lastDrawnSequencesPage = -1;
 int lastDrawnSoundscapesPage = -1;
-int lastDrawnGamesMenuPage = -1;
 int lastDrawnSettingsPage = -1;
 bool lastDrawnShowDeviceStats = false;
 
@@ -3590,52 +2855,42 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH); // backlight on
+  digitalWrite(TFT_BL, HIGH);
 
   tft.init();
-  tft.setRotation(1); // landscape, 480x320. If USB ends up on the left
-                       // instead of the right, change this to 3.
+  tft.setRotation(1); // landscape 480x320
   initTheme();
+  tft.fillScreen(COLOR_BG);
 
-  // ---- SD card (optional) - splash screen + soundscape file scan.
-  // Both gracefully do nothing if there's no card, or the card has
-  // neither file - nothing here can block or fail the rest of boot.
+  // Audio engine first: it claims the speaker DAC (IO26) and then hands
+  // IO25 back so waveform_begin() below can own it for the coil PWM.
+  audio_begin();
+  waveform_begin();
+
+  // SD card: splash + soundscape list. Missing card = plain screens, no sounds.
   bool sdOk = sdmedia_begin();
-  Serial.print("SD card mount: ");
-  Serial.println(sdOk ? "SUCCESS" : "FAILED");
-  if (sdOk) {
-    bool splashShown = sdmedia_showSplash();
-    Serial.print("Splash image found: ");
-    Serial.println(splashShown ? "YES" : "NO (no splash.bmp at card root, or card mounted but unreadable)");
-    if (splashShown) delay(1800); // let it actually be seen before moving on
+  Serial.printf("SD card mount: %s\n", sdOk ? "OK" : "FAILED");
+  if (sdOk && sdmedia_showSplash()) {
+    splashOnScreen = true;
+    delay(1500);
   }
-  int soundscapeCount = sdmedia_scanSoundscapes();
-  Serial.print("Soundscape files found: ");
-  Serial.println(soundscapeCount);
+  Serial.printf("Soundscapes found: %d\n", sdmedia_scanSoundscapes());
 
-  // ---- Touch calibration (tied to rotation; auto-invalidates if rotation
-  // changes, then reused every boot after that) ----
-  // A resistive touch panel's raw readings don't map directly to screen
-  // pixels, and that mapping is specific to whichever rotation was active
-  // when it was calibrated. Changing rotation (e.g. portrait->landscape)
-  // without recalibrating causes exactly the "have to tap it repeatedly"
-  // symptom - this stores which rotation the saved calibration belongs to
-  // and automatically re-runs it if that doesn't match the current one,
-  // rather than needing a manual flash erase.
+  // Touch calibration (tied to rotation)
   static const uint8_t CURRENT_ROTATION = 1;
   uint16_t calData[5];
   Preferences prefs;
   prefs.begin("tftcal", false);
   bool haveValidCal = false;
   if (prefs.isKey("calData") && prefs.isKey("calRotation")) {
-    uint8_t savedRotation = prefs.getUChar("calRotation", 255);
-    if (savedRotation == CURRENT_ROTATION) {
+    if (prefs.getUChar("calRotation", 255) == CURRENT_ROTATION) {
       prefs.getBytes("calData", calData, sizeof(calData));
       tft.setTouch(calData);
       haveValidCal = true;
     }
   }
   if (!haveValidCal) {
+    splashOnScreen = false;
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(MC_DATUM);
@@ -3646,54 +2901,22 @@ void setup() {
   }
   prefs.end();
 
-  waveform_begin();
   loadPeople();
   loadFavorites();
   loadSessionLog();
   loadSetupInfo();
-  wifitime_begin(); // fast no-op if WiFi was never set up; brief reconnect+NTP resync otherwise
-  btaudio_setSavedDeviceName(btDeviceName);
-  btaudio_setHeadphonesMode(btHeadphonesMode);
-  localaudio_begin(); // installs the I2S driver for the local wired speaker - always available regardless of Bluetooth config
+  wifitime_begin(); // brief NTP sync only if WiFi was set up; WiFi is off again afterwards
+
   audio_setVolume((uint8_t)volumePercent);
-
-#if ENABLE_BT_AUDIO
-  btaudio_begin("PEMF-Headset");
-  // Deliberately NOT pre-connecting to a saved speaker here at boot
-  // anymore. That was tried, but real documented reliability issues
-  // exist in this Bluetooth library's connection lifecycle (background
-  // reconnect-retry behavior that doesn't always resolve cleanly) - and
-  // if that ever caused setup() to stall, the device's touchscreen would
-  // never become responsive at all, since the main loop (where touches
-  // are actually read) never starts until setup() finishes. That's a
-  // far worse outcome than the mid-session connect wait this was trying
-  // to avoid. BT audio now connects on-demand, mid-session, same as the
-  // proven-working design from before - see the Run screen's BT toggle.
-#endif
-
-  drawWelcomeScreen();
+  audio_setHeadphonesMode(btHeadphonesMode);
+  audio_setBtDeviceName(btDeviceName);
+  applyAudioOutput(); // Bluetooth connects in the background if it's the chosen output
 }
 
 void loop() {
-  uint16_t tx, ty;
+  uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
 
-  // TEMPORARY diagnostic - prints every touch read to Serial so we can
-  // see exactly what's happening when a tap doesn't seem to register.
-  // Safe to leave in during troubleshooting; remove once this is sorted.
-  static bool wasTouchedDebug = false;
-  if (touched && !wasTouchedDebug) {
-    Serial.print("TOUCH at raw x=");
-    Serial.print(tx);
-    Serial.print(" y=");
-    Serial.print(ty);
-    Serial.print("  screen=");
-    Serial.println((int)screen);
-  }
-  wasTouchedDebug = touched;
-
-  // Advance the WiFi setup portal (non-blocking) if it's active, and
-  // move on once it finishes (connected or timed out) or was cancelled.
   if (screen == SCR_WIFI_SETUP && wifitime_isPortalActive()) {
     if (wifitime_processPortal()) {
       tft.fillScreen(COLOR_BG);
@@ -3703,137 +2926,36 @@ void loop() {
       tft.drawString(wifitime_isConfigured() ? "WiFi connected!" : "Setup timed out - try again.", 240, 160);
       delay(1500);
       screen = SCR_SETTINGS;
+      fullRedrawRequested = true;
     }
   }
 
-  // Animate the active game screen, where one needs continuous motion
-  // rather than just redrawing on touch. Zen Garden is deliberately
-  // absent here - it's purely tap-driven with no animation needed.
-  if (screen == SCR_GAME_RIPPLE || screen == SCR_GAME_BREATH || screen == SCR_GAME_STILL ||
-      screen == SCR_GAME_COLORFLOW || screen == SCR_GAME_PULSE || screen == SCR_GAME_BUBBLE ||
-      screen == SCR_GAME_MATCH || screen == SCR_GAME_SAND || screen == SCR_GAME_PETAL) {
-    static unsigned long lastGameFrame = 0;
-    if (millis() - lastGameFrame >= 40) {
-      switch (screen) {
-        case SCR_GAME_RIPPLE:    updateGameRipples(); break;
-        case SCR_GAME_BREATH:    updateGameBreath(); break;
-        case SCR_GAME_STILL:     updateGameStill(); break;
-        case SCR_GAME_COLORFLOW: updateGameColorFlow(); break;
-        case SCR_GAME_PULSE:     updateGamePulse(); break;
-        case SCR_GAME_BUBBLE:    updateGameBubbles(); break;
-        case SCR_GAME_MATCH:     updateGameMatch(); break;
-        case SCR_GAME_SAND:      updateGameSand(); break;
-        case SCR_GAME_PETAL:     updateGamePetal(); break;
-        default: break;
-      }
-      lastGameFrame = millis();
-    }
-  }
-
-  // Feed the local speaker's I2S buffer, if that's the active output.
-  // Runs every iteration regardless of which screen is showing, since
-  // audio needs to keep playing in the background (e.g. a soundscape
-  // playing while browsing Settings) - cheap to call when nothing is
-  // actually enabled.
-  if (!audioUsingBluetooth()) {
-    localaudio_update();
-  } else {
-#if ENABLE_BT_AUDIO
-    btaudio_update(); // finishes the volume-set once the connection is actually confirmed established
-#endif
-  }
-
-  // Advance any active program (ramp interpolation, step transitions)
   updateProgram();
 
   // Auto-stop when the session timer elapses
+  bool runNeedsRefresh = false;
   if (sessionTimerArmed && waveform_isRunning()) {
     unsigned long elapsedMin = (millis() - sessionStartMillis) / 60000UL;
     if ((int)elapsedMin >= timerMinutes) {
-      addLogEntry(selName, selFreq, (int)elapsedMin);
-      stopProgram();
-      waveform_stop();
-      sessionTimerArmed = false;
-      if (screen == SCR_RUN) drawRunScreen();
+      endSession();
+      runNeedsRefresh = true;
     }
   }
+  // A Sequence can also finish on its own
+  static bool wasRunning = false;
+  if (wasRunning && !waveform_isRunning() && !sessionPaused) runNeedsRefresh = true;
+  wasRunning = waveform_isRunning();
 
-  // Once-a-second refresh of the countdown text and the live local-
-  // speaker diagnostic - deliberately independent of whether a session
-  // is actually running (a real gap: this used to live inside the
-  // sessionTimerArmed && waveform_isRunning() check above, which meant
-  // the speaker diagnostic never updated at all if someone was just
-  // testing "Speaker: ON" without also starting a session).
-  if (screen == SCR_RUN) {
-    static unsigned long lastCountdownRedraw = 0;
-    if (millis() - lastCountdownRedraw >= 1000) {
-      drawCountdownOnly();
-      lastCountdownRedraw = millis();
-    }
+  if (devModeUnlocked && (millis() - devModeStartMillis) / 60000UL >= DEV_MODE_TIMEOUT_MIN) {
+    relockDevMode();
+    if (screen == SCR_SETTINGS) fullRedrawRequested = true;
   }
 
-  // Auto-relock Developer Mode after its timeout
-  if (devModeUnlocked) {
-    unsigned long elapsedMin = (millis() - devModeStartMillis) / 60000UL;
-    if (elapsedMin >= DEV_MODE_TIMEOUT_MIN) {
-      relockDevMode();
-      if (screen == SCR_RUN || screen == SCR_SETTINGS) {
-        if (screen == SCR_RUN) drawRunScreen();
-        else drawSettingsScreen();
-      }
-    }
-  }
-
-  // Redraw when the screen or page changes
-  if (screen != lastDrawnScreen || (screen == SCR_LIST && listPage != lastDrawnPage) ||
-      (screen == SCR_SEQUENCES && sequencesPage != lastDrawnSequencesPage) ||
-      (screen == SCR_SOUNDSCAPES && soundscapesPage != lastDrawnSoundscapesPage) ||
-      (screen == SCR_GAMES_MENU && gamesMenuPage != lastDrawnGamesMenuPage) ||
-      (screen == SCR_CATEGORY && showDeviceStats != lastDrawnShowDeviceStats) ||
-      (screen == SCR_SETTINGS && settingsPage != lastDrawnSettingsPage)) {
-    switch (screen) {
-      case SCR_WELCOME:            drawWelcomeScreen(); break;
-      case SCR_SETUP_MODE:         drawSetupModeScreen(); break;
-      case SCR_SETUP_LOGIN_CHOICE: drawSetupLoginChoiceScreen(); break;
-      case SCR_TEXT_ENTRY:         drawTextEntryScreen(); break;
-      case SCR_CATEGORY:           drawCategoryScreen(); break;
-      case SCR_LIST:               drawListScreen(); break;
-      case SCR_RUN:                drawRunScreen(); break;
-      case SCR_SETTINGS:           drawSettingsScreen(); break;
-      case SCR_PIN:                drawPinScreen(); break;
-      case SCR_LOG:                drawLogScreen(); break;
-      case SCR_UPDATE:             drawUpdateScreen(); break;
-      case SCR_CLIENT_CONFIRM:     drawClientConfirmScreen(); break;
-      case SCR_BT_SCAN:            drawBtScanScreen(); break;
-      case SCR_CUSTOM_FREQ:        drawCustomFreqScreen(); break;
-      case SCR_PERSON_PICKER:      drawPersonPickerScreen(); break;
-      case SCR_MANAGE_PEOPLE:      drawManagePeopleScreen(); break;
-      case SCR_SEQUENCES:          drawSequencesScreen(); break;
-      case SCR_SOUNDSCAPES:        drawSoundscapesScreen(); break;
-      case SCR_WIFI_SETUP:         drawWifiSetupScreen(); break;
-      case SCR_GAME_RIPPLE:        drawGameRippleScreen(); break;
-      case SCR_GAMES_MENU:         drawGamesMenuScreen(); break;
-      case SCR_GAME_BREATH:        drawGameBreathScreen(); break;
-      case SCR_GAME_STILL:         drawGameStillScreen(); break;
-      case SCR_GAME_COLORFLOW:     drawGameColorFlowScreen(); break;
-      case SCR_GAME_PULSE:         drawGamePulseScreen(); break;
-      case SCR_GAME_ZEN:           drawGameZenScreen(); break;
-      case SCR_GAME_BUBBLE:        drawGameBubbleScreen(); break;
-      case SCR_GAME_MATCH:         drawGameMatchScreen(); break;
-      case SCR_GAME_SAND:          drawGameSandScreen(); break;
-      case SCR_GAME_PETAL:         drawGamePetalScreen(); break;
-    }
-    lastDrawnScreen = screen;
-    lastDrawnPage = listPage;
-    lastDrawnSequencesPage = sequencesPage;
-    lastDrawnSoundscapesPage = soundscapesPage;
-    lastDrawnGamesMenuPage = gamesMenuPage;
-    lastDrawnShowDeviceStats = showDeviceStats;
-    lastDrawnSettingsPage = settingsPage;
-  }
-
+  // ---- touch: one handler call per new press ----
+  bool needsRefresh = false;
   static bool wasTouched = false;
   if (touched && !wasTouched) {
+    Screen before = screen;
     switch (screen) {
       case SCR_WELCOME:            handleWelcomeTouch(tx, ty); break;
       case SCR_SETUP_MODE:         handleSetupModeTouch(tx, ty); break;
@@ -3854,56 +2976,64 @@ void loop() {
       case SCR_SEQUENCES:          handleSequencesTouch(tx, ty); break;
       case SCR_SOUNDSCAPES:        handleSoundscapesTouch(tx, ty); break;
       case SCR_WIFI_SETUP:         handleWifiSetupTouch(tx, ty); break;
-      case SCR_GAME_RIPPLE:        handleGameRippleTouch(tx, ty); break;
-      case SCR_GAMES_MENU:         handleGamesMenuTouch(tx, ty); break;
-      case SCR_GAME_BREATH:        handleGameBreathTouch(tx, ty); break;
-      case SCR_GAME_STILL:         handleGameStillTouch(tx, ty); break;
-      case SCR_GAME_COLORFLOW:     handleGameColorFlowTouch(tx, ty); break;
-      case SCR_GAME_PULSE:         handleGamePulseTouch(tx, ty); break;
-      case SCR_GAME_ZEN:           handleGameZenTouch(tx, ty); break;
-      case SCR_GAME_BUBBLE:        handleGameBubbleTouch(tx, ty); break;
-      case SCR_GAME_MATCH:         handleGameMatchTouch(tx, ty); break;
-      case SCR_GAME_SAND:          handleGameSandTouch(tx, ty); break;
-      case SCR_GAME_PETAL:         handleGamePetalTouch(tx, ty); break;
     }
-    // Force a redraw on the next loop pass since state may have changed
-    // even when the Screen enum value itself didn't (e.g. Start/Stop,
-    // stepper taps, PIN digit taps, checkbox toggle, keyboard taps).
-    if (screen == SCR_WELCOME)        refreshWelcomeCheckbox();
-    if (screen == SCR_TEXT_ENTRY)     drawTextEntryScreen();
-    if (screen == SCR_RUN)            refreshRunControls();
-    if (screen == SCR_SETTINGS)       drawSettingsScreen();
-    if (screen == SCR_PIN)            drawPinScreen();
-    if (screen == SCR_CLIENT_CONFIRM) drawClientConfirmScreen();
-    if (screen == SCR_BT_SCAN)        drawBtScanScreen();
-    if (screen == SCR_CUSTOM_FREQ)    drawCustomFreqScreen();
-    if (screen == SCR_MANAGE_PEOPLE)  drawManagePeopleScreen();
-    if (screen == SCR_SOUNDSCAPES)    drawSoundscapesScreen();
+    if (screen == before) needsRefresh = true;
+    // Handlers that painted a temporary message (greeting, "checking for
+    // updates...") leave the screen dirty - repaint those fully.
+    if (before == SCR_PERSON_PICKER || before == SCR_UPDATE) fullRedrawRequested = true;
   }
   wasTouched = touched;
 
-  // Live-refresh the BT scan screen while a scan is running, so newly
-  // discovered devices appear without needing a touch - but only redraw
-  // when something actually changed (a new device found, or the "Starting
-  // scan..." -> "Scanning..." transition), not on a blind timer. A full-
-  // screen redraw competing with an in-progress tap (e.g. tapping the
-  // scan button to stop it) was a real, if intermittent, cause of taps
-  // needing to be repeated on this screen.
+  syncAudio();
+
+  // ---- drawing: at most ONE full draw per pass ----
+  bool changed = fullRedrawRequested || screen != lastDrawnScreen ||
+                 (screen == SCR_LIST && listPage != lastDrawnPage) ||
+                 (screen == SCR_SEQUENCES && sequencesPage != lastDrawnSequencesPage) ||
+                 (screen == SCR_SOUNDSCAPES && soundscapesPage != lastDrawnSoundscapesPage) ||
+                 (screen == SCR_CATEGORY && showDeviceStats != lastDrawnShowDeviceStats) ||
+                 (screen == SCR_SETTINGS && settingsPage != lastDrawnSettingsPage);
+  if (changed) {
+    drawScreen(screen);
+    lastDrawnScreen = screen;
+    lastDrawnPage = listPage;
+    lastDrawnSequencesPage = sequencesPage;
+    lastDrawnSoundscapesPage = soundscapesPage;
+    lastDrawnShowDeviceStats = showDeviceStats;
+    lastDrawnSettingsPage = settingsPage;
+    fullRedrawRequested = false;
+  } else if (needsRefresh) {
+    refreshScreen(screen);
+  } else if (runNeedsRefresh && screen == SCR_RUN) {
+    refreshRunControls();
+  }
+
+  // Once-a-second small updates on the Run screen (countdown, live
+  // frequency, BT status) - each only repaints if its text changed.
+  if (screen == SCR_RUN) {
+    static unsigned long lastTick = 0;
+    if (millis() - lastTick >= 1000) {
+      drawCountdownOnly();
+      lastTick = millis();
+    }
+  }
+
+  // Live BT scan list - redraw only when something actually changed.
   static int lastBtScanRedrawCount = -1;
   static bool lastBtScanActiveState = false;
-  if (screen == SCR_BT_SCAN && (btaudio_isScanning() || scanRequested)) {
-    bool nowActive = btaudio_isScanning();
-    if (nowActive) scanRequested = false; // real scanning has started - drop the "Starting..." label
-    int currentCount = btaudio_scanResultCount();
+  if (screen == SCR_BT_SCAN && (audio_btIsScanning() || scanRequested)) {
+    bool nowActive = audio_btIsScanning();
+    if (nowActive) scanRequested = false;
+    int currentCount = audio_btScanResultCount();
     if (currentCount != lastBtScanRedrawCount || nowActive != lastBtScanActiveState) {
       drawBtScanScreen();
       lastBtScanRedrawCount = currentCount;
       lastBtScanActiveState = nowActive;
     }
   } else {
-    lastBtScanRedrawCount = -1; // reset so the next scan starts fresh
+    lastBtScanRedrawCount = -1;
     lastBtScanActiveState = false;
   }
 
-  delay(20); // simple debounce; touch is polled, not interrupt-driven
+  delay(15); // touch is polled; audio runs in its own task so this no longer matters for sound
 }
