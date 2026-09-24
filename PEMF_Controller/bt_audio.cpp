@@ -59,7 +59,7 @@ static const float CARRIER_HZ = 200.0f;
 static const float BINAURAL_MAX_HZ = 30.0f;
 static const float AUDIBLE_HZ = 100.0f;
 static const float DIRECT_MAX_HZ = 1000.0f;
-static const float TONE_LEVEL = 0.45f; // of full scale - a pure tone near full level makes small speakers distort (sounds crunchy)
+static const float TONE_LEVEL = 0.70f; // of full scale - a pure tone near full level makes small speakers distort (sounds crunchy)
 
 static const int SIN_N = 256;
 static float sinTable[SIN_N];
@@ -279,7 +279,7 @@ static void serviceSoundscapeFile() {
 // (Off <-> Tone <-> Soundscape) so there are no clicks.
 // ---------------------------------------------------------------------------
 static AudioSource renderingSource = AUDIO_SRC_OFF;
-static const float SCAPE_GAIN = 1.0f; // no boost - boosting clipped the loud parts (rain hits, thunder) into static
+static const float SCAPE_GAIN = 0.6f; // nature was already loud - this offsets the 1.6.3 volume raise so only the tone gets louder // no boost - boosting clipped the loud parts (rain hits, thunder) into static
 // Gentle limiter: below ~73% of full scale nothing changes; above it, peaks
 // are squeezed instead of chopped off, so loud settings stay clean.
 static inline int16_t softLimit(float v) {
@@ -337,8 +337,8 @@ static void speakerInit() {
   cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB; // correct format for the built-in DAC
   cfg.intr_alloc_flags = 0;
-  cfg.dma_buf_count = 8;
-  cfg.dma_buf_len = 512;
+  cfg.dma_buf_count = 6;   // ~35 ms of speaker buffer - small on purpose, so switching to the
+  cfg.dma_buf_len = 256;   // speaker mid-session never starves Bluetooth of RAM
   cfg.use_apll = false;
   cfg.tx_desc_auto_clear = false;
 
@@ -560,7 +560,7 @@ const char* audio_soundscapeFile() { return currentPath; }
 // 55% lands on the speaker level that sounded right in testing.
 static uint8_t btSpeakerVolumeFor(uint8_t percent) {
   if (percent == 0) return 0;
-  float v = 127.0f * powf(percent / 100.0f, 0.4f);
+  float v = 127.0f * powf(percent / 100.0f, 0.25f); // louder start: 55% -> ~86% of the speaker's range
   return v > 127.0f ? 127 : (uint8_t)v;
 }
 
@@ -576,7 +576,7 @@ void audio_setVolume(uint8_t percent) {
     if (percent == 0) g_volume = 0.0f;
     else {
       float db = (percent <= 55) ? (percent - 55) * 0.45f : (percent - 55) * 0.15f;
-      g_volume = powf(10.0f, db / 20.0f);
+      g_volume = powf(10.0f, (db + 6.0f) / 20.0f); // +6 dB: the onboard speaker was too quiet at every setting
     }
   }
 }

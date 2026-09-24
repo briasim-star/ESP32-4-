@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.6.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.6.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -358,10 +358,11 @@ AudioOutput audioOutputPref = AUDIO_OUT_SPEAKER;
 AudioSource sessionSoundMode = AUDIO_SRC_TONE;
 int sessionSoundscapeIndex = -1;
 int previewSoundscapeIndex = -1;
+bool sessionForceSpeaker = false; // tapped "use the device speaker" during a session (not saved)
 
 bool audioUsingBluetooth() {
 #if ENABLE_BT_AUDIO
-  return audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0;
+  return audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0 && !sessionForceSpeaker;
 #else
   return false;
 #endif
@@ -3016,9 +3017,11 @@ void outputStatusText(char* buf, size_t len) {
       lastDiag = diag;
     }
     if (!audio_btIsConnected()) btStatusText(buf, len);
-    else snprintf(buf, len, "Playing on %s", btDeviceName);
+    else snprintf(buf, len, "%s - tap for device speaker", btDeviceName);
+  } else if (sessionForceSpeaker) {
+    snprintf(buf, len, "Device speaker - tap for %s", btDeviceName);
   } else {
-    snprintf(buf, len, "Playing on onboard speaker");
+    snprintf(buf, len, "Playing on device speaker");
   }
 }
 
@@ -3193,6 +3196,7 @@ void updateRunPulse() {
 }
 
 void endSession() {
+  if (sessionForceSpeaker) { sessionForceSpeaker = false; applyAudioOutput(); } // back to the Bluetooth speaker
   if (waveform_isRunning() || sessionPaused) {
     int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
     addLogEntry(selName, selFreq, mins);
@@ -3278,9 +3282,15 @@ void handleRunTouch(int x, int y) {
     screen = SCR_SOUNDSCAPES; // the session keeps running while picking
     return;
   }
-  // Tapping the status line retries Bluetooth when it wasn't found.
-  if (audioUsingBluetooth() && x >= 240 && y >= 272 && y < 300 && audio_btStatus() == BT_STATUS_NOT_FOUND) {
-    audio_btRetry();
+  // Tapping the status line: retry Bluetooth if it wasn't found, otherwise
+  // switch between the Bluetooth speaker and the device's own speaker.
+  if (x >= 236 && y >= 270 && y < 304 && audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0) {
+    if (!sessionForceSpeaker && audio_btStatus() == BT_STATUS_NOT_FOUND) {
+      audio_btRetry();
+    } else {
+      sessionForceSpeaker = !sessionForceSpeaker;
+      applyAudioOutput();
+    }
   }
 }
 
