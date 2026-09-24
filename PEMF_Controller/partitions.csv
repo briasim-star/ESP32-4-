@@ -1,11 +1,11 @@
 # MADD PEMF flash layout (4 MB). Two equal app slots so wireless updates
 # work: the running firmware stays in one slot while the new one downloads
 # into the other. NVS (settings) stays at the same address as before.
-# 1.9.2: the unused 64 KB "spiffs" area was given to the two app slots
-# (+32 KB each). Changing this table needs one USB install; after that,
-# wireless updates work as before.
+# (App slots must start on 64 KB boundaries, so the last 64 KB can't be
+# split between the two equal slots - it stays as a small spare area.)
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x5000,
 otadata,  data, ota,     0xe000,   0x2000,
-app0,     app,  ota_0,   0x10000,  0x1F8000,
-app1,     app,  ota_1,   0x208000, 0x1F8000,
+app0,     app,  ota_0,   0x10000,  0x1F0000,
+app1,     app,  ota_1,   0x200000, 0x1F0000,
+spiffs,   data, spiffs,  0x3F0000, 0x10000,
