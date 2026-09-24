@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.4.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.4.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -594,14 +594,15 @@ void drawTopStatus(bool force) {
 }
 
 // Top bar: badge + title on the left, live status on the right, spectrum stripe under it.
-void drawTopBar(const char* title, bool showBack) {
+void drawTopBar(const char* title, bool showBack, bool showHome = false) {
   drawHexBadge(34, 20, 14);
   char t[40];
   snprintf(t, sizeof(t), showBack ? "< %s" : "%s", title);
   tft.setFreeFont(FONT_LG);
   const GFXfont* f = (tft.textWidth(t) <= 240) ? FONT_LG : FONT_SM;
   drawFittedText(56, f == FONT_LG ? 8 : 12, 240, t, f, MADD_TEXT, MADD_PANEL);
-  drawTopStatus(true);
+  if (showHome) drawChamferButton(btnHome, "Home", MADD_PANEL, MADD_EDGE, MADD_TEXT);
+  else drawTopStatus(true);
   drawSpectrumStripe(38);
 }
 
@@ -898,33 +899,6 @@ void drawWelcomeScreen() {
   // its own fixed size here rather than stretching to match.
   refreshWelcomeCheckbox();
 
-  // Small diagnostic lines, always shown, no navigation needed - so
-  // this can be read directly off the screen instead of needing a
-  // computer and Serial Monitor to check the same information. Solid
-  // backing behind them for the same readability reason as the
-  // disclaimer text above - plain text with no button panel of its own.
-  tft.fillRect(0, 274, 480, 46, COLOR_BG);
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  char sdDiag[48];
-  if (!sdmedia_isAvailable()) {
-    tft.drawString("SD card: not detected", 20, 278);
-  } else if (!sdmedia_lastScanDirOpened()) {
-    tft.drawString("SD card: OK, but /sounds folder not found", 20, 278);
-  } else {
-    snprintf(sdDiag, sizeof(sdDiag), "SD/sounds: %d entries, %d files, %d matched .wav",
-             sdmedia_lastScanTotalEntries(), sdmedia_lastScanFileEntries(), sdmedia_soundscapeCount());
-    tft.drawString(sdDiag, 20, 278);
-  }
-
-  char audioDiag[64];
-  if (audioUsingBluetooth()) {
-    snprintf(audioDiag, sizeof(audioDiag), "Sound out: Bluetooth (%s)", btDeviceName);
-  } else {
-    snprintf(audioDiag, sizeof(audioDiag), "Sound out: Speaker (%s)", audio_speakerReady() ? "ready" : "DRIVER FAILED");
-  }
-  drawFittedText(20, 296, 440, audioDiag, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
 }
 
 // The checkbox and Continue button are the only things on this screen
@@ -1871,6 +1845,7 @@ bool btForgetArmed = false;
 unsigned long btForgetArmedAt = 0;
 Rect btScanResultRects[6];
 
+unsigned long btPickAt = 0; // when a device was tapped in the scan list (0 = none pending)
 bool scanRequested = false; // true the instant the button is tapped, before the BT stack actually starts discovering - gives immediate feedback instead of an unexplained gap
 
 void drawBtScanScreen() {
@@ -1984,6 +1959,7 @@ void handleBtScanTouch(int x, int y) {
       audio_setBtDeviceName(btDeviceName);
       audio_setOutput(AUDIO_OUT_BLUETOOTH);
       audio_btConnectToScanResult(i);
+      btPickAt = millis();
       scanRequested = false;
       screen = SCR_BT_SCAN;
       return;
@@ -2198,69 +2174,76 @@ void handleUpdateTouch(int x, int y) {
       screen = SCR_UPDATE;
       return;
     }
-    // Updates need the secure (HTTPS) connection's memory: stop any session
-    // and shut Bluetooth down first. The device restarts after an update,
-    // which brings Bluetooth back automatically.
+    // Updates run at startup, before Bluetooth or a session has taken any
+    // memory - checking mid-run (with Bluetooth up) could crash the board.
+    // One tap: restart -> check -> install if newer -> restart into it.
     endSession();
     audio_setSource(AUDIO_SRC_OFF);
-    if (audio_btStarted()) audio_btEnd(true);
-
-    if (!otaChecked) {
-      otaChecking = true;
-      tft.fillScreen(COLOR_BG);
-      tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Checking for updates...", 240, 150);
-      // Hardware watchdog as a hard backstop - a real hang here once
-      // required a battery pull to recover from, and software timeouts
-      // alone have a documented reliability quirk (see ota_update.cpp),
-      // so this guarantees automatic recovery within 45s no matter what.
-      esp_task_wdt_init(45, true);
-      esp_task_wdt_add(NULL);
-      bool ok = ota_checkForUpdate();
-      esp_task_wdt_delete(NULL);
-      otaChecking = false;
-      if (!ok && strlen(ota_lastErrorMessage()) > 0) {
-        tft.fillScreen(COLOR_BG);
-        tft.drawString("Couldn't check for updates", 240, 140);
-        tft.setFreeFont(FONT_SM);
-        tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-        tft.drawString(ota_lastErrorMessage(), 240, 175);
-        delay(2000);
-      } else {
-        otaChecked = true;
-        otaUpdateAvailable = ok;
-      }
-      screen = SCR_UPDATE;
-    } else if (otaUpdateAvailable) {
-      otaChecking = true;
-      tft.fillScreen(COLOR_BG);
-      tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Downloading update...", 240, 140);
-      tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-      tft.drawString("The device will restart when done.", 240, 175);
-      esp_task_wdt_init(45, true);
-      esp_task_wdt_add(NULL);
-      bool ok = ota_downloadAndInstall(); // restarts the device on success - only returns on failure
-      esp_task_wdt_delete(NULL);
-      otaChecking = false;
-      tft.fillScreen(COLOR_BG);
-      tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Update failed", 240, 140);
-      tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-      tft.drawString(ota_lastErrorMessage(), 240, 175);
-      tft.drawString("Nothing was changed - try again later.", 240, 195);
-      delay(2500);
-      screen = SCR_UPDATE;
-    }
+    Preferences p;
+    p.begin("ota", false);
+    p.putBool("pending", true);
+    p.end();
+    tft.fillScreen(COLOR_BG);
+    tft.setFreeFont(FONT_LG);
+    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Restarting to check for updates", 240, 140);
+    tft.setFreeFont(FONT_SM);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+    tft.drawString("This takes about 30 seconds.", 240, 175);
+    tft.setTextDatum(TL_DATUM);
+    delay(1500);
+    audio_btEnd();
+    ESP.restart();
   }
+}
+
+// Runs from setup() when "Check for Updates" was tapped: check, and install
+// if a newer version is published. Shows plain progress the whole time.
+void runPendingUpdateCheck() {
+  Preferences p;
+  p.begin("ota", false);
+  bool pending = p.getBool("pending", false);
+  if (pending) p.putBool("pending", false); // one attempt only - never a restart loop
+  p.end();
+  if (!pending) return;
+
+  auto show = [](const char* big, const char* small) {
+    tft.fillScreen(COLOR_BG);
+    tft.setFreeFont(FONT_LG);
+    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(big, 240, 140);
+    tft.setFreeFont(FONT_SM);
+    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+    tft.drawString(small, 240, 175);
+    tft.setTextDatum(TL_DATUM);
+  };
+
+  show("Checking for updates...", "Connecting to WiFi");
+  esp_task_wdt_init(45, true);
+  esp_task_wdt_add(NULL);
+  bool newer = ota_checkForUpdate();
+  esp_task_wdt_delete(NULL);
+  if (!newer) {
+    if (strlen(ota_lastErrorMessage()) > 0) show("Couldn't check for updates", ota_lastErrorMessage());
+    else {
+      char v[40];
+      snprintf(v, sizeof(v), "You have the latest version (%s)", FIRMWARE_VERSION);
+      show("You're up to date", v);
+    }
+    delay(3000);
+    return;
+  }
+  char msg[48];
+  snprintf(msg, sizeof(msg), "Installing version %s", ota_latestVersionString());
+  show(msg, "Please keep the power on - about 1 minute.");
+  esp_task_wdt_init(45, true);
+  esp_task_wdt_add(NULL);
+  ota_downloadAndInstall(); // restarts into the new version on success
+  esp_task_wdt_delete(NULL);
+  show("Update didn't finish", ota_lastErrorMessage());
+  delay(3500);
 }
 
 // ---------------------------------------------------------------------
@@ -2447,9 +2430,9 @@ void handleCategoryTouch(int x, int y) {
 int sequencesPage = 0;
 const int SEQUENCES_PER_PAGE = 6;
 Rect sequenceItemRects[SEQUENCES_PER_PAGE];
-Rect btnSeqPrevPage = {20, 254, 140, 46};
-Rect btnSeqBack = {180, 254, 120, 46};
-Rect btnSeqNextPage = {320, 254, 140, 46};
+Rect btnSeqPrevPage = {18, 222, 140, 42};
+Rect btnSeqBack = {170, 222, 140, 42};
+Rect btnSeqNextPage = {322, 222, 140, 42};
 
 // Compact "X Hz -> Y Hz" preview using the sequence's first and last
 // step frequencies, so a person can see roughly what range it moves
@@ -2467,78 +2450,30 @@ void getSequenceFreqRange(int idx, char* buf, size_t bufLen) {
 }
 
 void drawSequencesScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Programs", 20, 12);
-  drawHomeButton();
-
-  int totalSeqPages = (NUM_SEQUENCES + SEQUENCES_PER_PAGE - 1) / SEQUENCES_PER_PAGE;
-  if (totalSeqPages > 1) {
-    // Placed next to the title rather than below the grid/nav row -
-    // there wasn't enough vertical room down there without it crowding
-    // into the Prev/Back/Next buttons.
-    char pageBuf[20];
-    snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", sequencesPage + 1, totalSeqPages);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 348, 20);
-    tft.setTextDatum(TL_DATUM);
-  }
+  drawAuroraBackground();
+  drawTopBar("Programs", true, true);
 
   int start = sequencesPage * SEQUENCES_PER_PAGE;
-  int colW = 220, rowH = 60, gapX = 20, gapY = 8;
   for (int i = 0; i < SEQUENCES_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 48 + row * (rowH + gapY), colW, rowH};
+    Rect r = {18 + col * 225, 52 + row * 54, 219, 48};
     sequenceItemRects[i] = r;
     if (idx < NUM_SEQUENCES) {
-      int radius = min(r.w, r.h) / 2;
-      tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_PANEL);
-      tft.drawRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_ACCENT);
-      // Name on its own line, then a dimmer frequency-range line below.
-      // Both are width-constrained with truncation - a real bug before:
-      // plain drawString() here had no width limit at all, so longer
-      // names genuinely ran outside the box.
-      int maxTextW = r.w - 16;
-      tft.setFreeFont(FONT_SM);
-      tft.setTextColor(TFT_WHITE, COLOR_PANEL);
-      tft.setTextDatum(TC_DATUM);
-      if (tft.textWidth(SEQUENCES[idx].name) <= maxTextW) {
-        tft.drawString(SEQUENCES[idx].name, r.x + r.w / 2, r.y + 8);
-      } else {
-        char trimmed[24];
-        strncpy(trimmed, SEQUENCES[idx].name, sizeof(trimmed) - 1);
-        trimmed[sizeof(trimmed) - 1] = 0;
-        int len = strlen(trimmed);
-        while (len > 1) {
-          trimmed[len - 1] = 0;
-          char tryBuf[26];
-          snprintf(tryBuf, sizeof(tryBuf), "%s..", trimmed);
-          if (tft.textWidth(tryBuf) <= maxTextW) {
-            tft.drawString(tryBuf, r.x + r.w / 2, r.y + 8);
-            break;
-          }
-          len--;
-        }
-      }
+      drawChamfer(r, MADD_PANEL, MADD_EDGE, 8);
+      tft.fillRect(r.x, r.y + 8, 4, r.h - 16, MADD_CYAN);
+      drawFittedText(r.x + 14, r.y + 8, r.w - 22, SEQUENCES[idx].name, FONT_SM, MADD_TEXT, MADD_PANEL);
       char rangeBuf[24];
       getSequenceFreqRange(idx, rangeBuf, sizeof(rangeBuf));
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_PANEL);
-      tft.drawString(rangeBuf, r.x + r.w / 2, r.y + 32); // always short (e.g. "10 -> 2 Hz"), never needs truncation
-      tft.setTextDatum(TL_DATUM);
+      drawFittedText(r.x + 14, r.y + 27, r.w - 22, rangeBuf, FONT_SM, MADD_CYAN, MADD_PANEL);
     }
   }
-  drawButton(btnSeqPrevPage, "< Prev");
-  drawButton(btnSeqBack, "Back", COLOR_MUTED);
-  drawButton(btnSeqNextPage, "Next >");
+  drawPagerRow(btnSeqPrevPage, btnSeqBack, btnSeqNextPage, sequencesPage, (NUM_SEQUENCES + SEQUENCES_PER_PAGE - 1) / SEQUENCES_PER_PAGE);
 }
 
 void handleSequencesTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
+  if (y < 36 && x < 300) { screen = SCR_CATEGORY; return; } // "< title" = back
   int start = sequencesPage * SEQUENCES_PER_PAGE;
   for (int i = 0; i < SEQUENCES_PER_PAGE; i++) {
     int idx = start + i;
@@ -2585,9 +2520,9 @@ void handleSequencesTouch(int x, int y) {
 int soundscapesPage = 0;
 const int SOUNDSCAPES_PER_PAGE = 6;
 Rect soundscapeItemRects[SOUNDSCAPES_PER_PAGE];
-Rect btnSndPrevPage = {20, 216, 140, 46};
-Rect btnSndBack = {180, 216, 120, 46};
-Rect btnSndNextPage = {320, 216, 140, 46};
+Rect btnSndPrevPage = {18, 222, 140, 42};
+Rect btnSndBack = {170, 222, 140, 42};
+Rect btnSndNextPage = {322, 222, 140, 42};
 
 
 // ---------------------------------------------------------------------
@@ -2597,49 +2532,30 @@ Rect btnSndNextPage = {320, 216, 140, 46};
 //   from Settings        -> tap to preview / tap again to stop
 // ---------------------------------------------------------------------
 void drawSoundscapesScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString(soundscapesOrigin == SCR_RUN ? "Pick a Sound" : "Soundscapes", 20, 12);
-  drawHomeButton();
+  drawAuroraBackground();
+  drawTopBar(soundscapesOrigin == SCR_RUN ? "Pick a sound" : "Soundscapes", true, soundscapesOrigin != SCR_RUN);
 
   int count = sdmedia_soundscapeCount();
-  int totalSndPages = (count + SOUNDSCAPES_PER_PAGE - 1) / SOUNDSCAPES_PER_PAGE;
-  if (totalSndPages > 1) {
-    char pageBuf[20];
-    snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", soundscapesPage + 1, totalSndPages);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 348, 20);
-    tft.setTextDatum(TL_DATUM);
-  }
-
   int highlighted = (soundscapesOrigin == SCR_RUN) ? sessionSoundscapeIndex : previewSoundscapeIndex;
   int start = soundscapesPage * SOUNDSCAPES_PER_PAGE;
-  int colW = 220, rowH = 44, gapX = 20, gapY = 8;
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 56 + row * (rowH + gapY), colW, rowH};
+    Rect r = {18 + col * 225, 52 + row * 54, 219, 48};
     soundscapeItemRects[i] = r;
     if (idx < count) {
       char name[32];
       prettySoundName(idx, name, sizeof(name));
       bool on = (idx == highlighted);
-      drawButtonFast(r, name, on ? COLOR_GOOD : 0xFFFF, on);
+      drawChamfer(r, on ? tft.color565(12, 58, 68) : MADD_PANEL, on ? MADD_CYAN : MADD_EDGE, 8);
+      tft.fillRect(r.x, r.y + 8, 4, r.h - 16, on ? MADD_CYAN : MADD_SPECTRUM[(idx + 2) % 6]);
+      drawFittedText(r.x + 14, r.y + 15, r.w - 22, name, FONT_LG, MADD_TEXT, MADD_PANEL);
     }
   }
+  drawPagerRow(btnSndPrevPage, btnSndBack, btnSndNextPage, soundscapesPage, (count + SOUNDSCAPES_PER_PAGE - 1) / SOUNDSCAPES_PER_PAGE);
   if (soundscapesOrigin != SCR_RUN) {
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("Tap to preview, tap again to stop.", 20, 272);
+    drawFittedText(18, 272, 444, "Tap to preview, tap again to stop.", FONT_SM, MADD_DIM, MADD_PANEL);
   }
-  drawButton(btnSndPrevPage, "< Prev");
-  drawButton(btnSndBack, "Back", COLOR_MUTED);
-  drawButton(btnSndNextPage, "Next >");
 }
 
 void stopPreview() { previewSoundscapeIndex = -1; }
@@ -2650,6 +2566,7 @@ void handleSoundscapesTouch(int x, int y) {
     if (soundscapesOrigin == SCR_RUN) screen = SCR_RUN; // never abandon a running session via Home here
     return;
   }
+  if (y < 36 && x < 300) { stopPreview(); screen = soundscapesOrigin; return; } // "< title" = back
   int count = sdmedia_soundscapeCount();
   int start = soundscapesPage * SOUNDSCAPES_PER_PAGE;
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
@@ -2679,9 +2596,9 @@ void handleSoundscapesTouch(int x, int y) {
 // Screen: preset list (paged)
 // ---------------------------------------------------------------------
 Rect itemRects[ITEMS_PER_PAGE];
-Rect btnPrevPage = {20, 216, 140, 46};
-Rect btnBackFromList = {180, 216, 120, 46};
-Rect btnNextPage = {320, 216, 140, 46};
+Rect btnPrevPage = {18, 222, 140, 42};
+Rect btnBackFromList = {170, 222, 140, 42};
+Rect btnNextPage = {322, 222, 140, 42};
 
 int listCount() {
   return catCount;
@@ -2694,48 +2611,59 @@ void getListLabel(int posInCategory, char* buf, size_t bufLen) {
 
 // 2-column x 3-row grid, same pattern as the Category screen. Plain
 // background (no splash) - this screen changes on every page flip.
+// Prev / Back / Next row used by every list screen, with a page count.
+void drawPagerRow(Rect prev, Rect back, Rect next, int page, int pages) {
+  if (pages < 1) pages = 1;
+  drawChamferButton(prev, "< Prev", MADD_PANEL, page > 0 ? MADD_EDGE : tft.color565(40, 28, 60), page > 0 ? MADD_TEXT : MADD_EDGE, FONT_LG);
+  drawChamferButton(back, "Back", MADD_PANEL, MADD_MAGENTA, MADD_TEXT, FONT_LG);
+  drawChamferButton(next, "Next >", MADD_PANEL, page + 1 < pages ? MADD_EDGE : tft.color565(40, 28, 60), page + 1 < pages ? MADD_TEXT : MADD_EDGE, FONT_LG);
+  if (pages > 1) {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "Page %d of %d", page + 1, pages);
+    tft.setFreeFont(FONT_SM);
+    tft.setTextColor(MADD_DIM);
+    tft.setTextDatum(TR_DATUM);
+    tft.drawString(buf, 462, 272);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
+// The color a category uses on the Home tiles, reused on its list.
+uint16_t categoryColor(Category c) {
+  for (int i = 0; i < 9; i++)
+    if (HOME_TILES[i].kind == TILE_CATEGORY && HOME_TILES[i].cat == c) return tileColor(HOME_TILES[i].colorIdx);
+  return MADD_MAGENTA;
+}
+// 2 x 3 grid of presets on the MADD background, each with its category color.
 void drawListScreen() {
-  tft.fillScreen(COLOR_BG);
-  tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  drawFittedText(20, 12, 320, viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], FONT_XL, TFT_WHITE, COLOR_BG);
-  drawHomeButton();
+  drawAuroraBackground();
+  drawTopBar(viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], true, true);
 
   int total = listCount();
-  int totalPages = (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
-  if (totalPages > 1) {
-    char pageBuf[20];
-    snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", listPage + 1, totalPages);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString(pageBuf, 20, 272);
-  }
-
   if (total == 0 && viewingFavorites) {
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.setTextDatum(TL_DATUM);
-    tft.drawString("No favorites yet - tap the star on", 20, 56);
-    tft.drawString("a preset's Run screen to add one.", 20, 78);
+    Rect note = {18, 60, 444, 70};
+    drawChamfer(note, MADD_PANEL, MADD_EDGE);
+    drawFittedText(34, 74, 410, "No favorites yet.", FONT_LG, MADD_TEXT, MADD_PANEL);
+    drawFittedText(34, 104, 410, "Tap the star on a session screen to add one.", FONT_SM, MADD_DIM, MADD_PANEL);
   }
   int start = listPage * ITEMS_PER_PAGE;
   char buf[64];
-  int colW = 220, rowH = 44, gapX = 20, gapY = 8;
   for (int i = 0; i < ITEMS_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 56 + row * (rowH + gapY), colW, rowH};
+    Rect r = {18 + col * 225, 52 + row * 54, 219, 48};
     itemRects[i] = r;
     if (idx < total) {
       getListLabel(idx, buf, sizeof(buf));
-      drawButtonFast(r, buf);
+      drawChamfer(r, MADD_PANEL, MADD_EDGE, 8);
+      tft.fillRect(r.x, r.y + 8, 4, r.h - 16, categoryColor(BASE_PRESETS[catIndices[idx]].category));
+      drawFittedText(r.x + 14, r.y + 8, r.w - 22, buf, FONT_SM, MADD_TEXT, MADD_PANEL);
+      char f[16];
+      formatFreq(BASE_PRESETS[catIndices[idx]].freqHz, f, sizeof(f));
+      drawFittedText(r.x + 14, r.y + 27, r.w - 22, f, FONT_SM, MADD_CYAN, MADD_PANEL);
     }
   }
-  drawButton(btnPrevPage, "< Prev");
-  drawButton(btnBackFromList, "Back", COLOR_MUTED);
-  drawButton(btnNextPage, "Next >");
+  drawPagerRow(btnPrevPage, btnBackFromList, btnNextPage, listPage, (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE);
 }
 
 void openRunScreenForIndex(int posInCategory) {
@@ -2752,6 +2680,7 @@ void openRunScreenForIndex(int posInCategory) {
 
 void handleListTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
+  if (y < 36 && x < 300) { screen = SCR_CATEGORY; return; } // "< title" = back
   int total = listCount();
   int start = listPage * ITEMS_PER_PAGE;
   for (int i = 0; i < ITEMS_PER_PAGE; i++) {
@@ -2932,12 +2861,18 @@ void outputStatusText(char* buf, size_t len) {
       lastFrames = fr;
       lastCheck = millis();
     }
+    // Plain words on screen; the technical detail goes to the USB cable only.
+    static int lastDiag = -1;
+    int diag = !audio_btIsConnected() ? 0 : !flowing ? 1 : (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() == 0) ? 2 : 3;
+    if (diag != lastDiag) {
+      const char* names[] = {"not connected", "connected, no audio requested", "streaming silence", "streaming audio"};
+      Serial.printf("[BT] %s\n", names[diag]);
+      lastDiag = diag;
+    }
     if (!audio_btIsConnected()) btStatusText(buf, len);
-    else if (!flowing) snprintf(buf, len, "BT: connected, no data");
-    else if (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() == 0) snprintf(buf, len, "BT: streaming (silent)");
-    else snprintf(buf, len, "BT: streaming");
+    else snprintf(buf, len, "Playing on %s", btDeviceName);
   } else {
-    snprintf(buf, len, audio_speakerReady() ? "Out: onboard speaker" : "Speaker driver failed");
+    snprintf(buf, len, "Playing on onboard speaker");
   }
 }
 
@@ -3421,6 +3356,7 @@ void setup() {
   audio_setVolume((uint8_t)volumePercent);
   audio_setHeadphonesMode(btHeadphonesMode);
   audio_setBtDeviceName(btDeviceName);
+  runPendingUpdateCheck(); // before Bluetooth starts, so the download has the memory it needs
   applyAudioOutput(); // Bluetooth connects in the background if it's the chosen output
 }
 
@@ -3564,6 +3500,26 @@ void loop() {
     toastUntil = 0;
     fullRedrawRequested = true; // repaint the screen underneath the banner
   }
+  // A picked device should connect within ~25 s. If it hasn't, fall back to
+  // the proven path: it's already saved, so restart once and connect at boot.
+  if (btPickAt) {
+    if (audio_btIsConnected()) btPickAt = 0;
+    else if (millis() - btPickAt > 25000) {
+      tft.fillScreen(COLOR_BG);
+      tft.setFreeFont(FONT_LG);
+      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Finishing Bluetooth setup", 240, 140);
+      tft.setFreeFont(FONT_SM);
+      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.drawString("Restarting once to connect - about 10 seconds.", 240, 175);
+      tft.setTextDatum(TL_DATUM);
+      delay(1500);
+      audio_btEnd();
+      ESP.restart();
+    }
+  }
+
   // The Bluetooth screen's status line follows along live.
   if (screen == SCR_BT_SCAN) {
     static unsigned long lastBtLine = 0;

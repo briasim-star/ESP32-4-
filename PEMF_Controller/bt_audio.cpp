@@ -454,11 +454,9 @@ static void btService() {
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
 
-  // Fast path: shortly after starting, go straight to the remembered address.
-  if (!btQuickConnectDone && btSavedAddrValid && millis() - btAttemptStartMs > 1500) {
-    btQuickConnectDone = true;
-    if (!a2dp.is_connected()) a2dp.connect_to(btSavedAddr);
-  }
+  // Note: never call a2dp.connect_to() from here. The library only starts
+  // the audio stream for connections its own state machine made; a
+  // connection made around it shows "connected" but plays nothing.
 }
 
 // ---------------------------------------------------------------------------
@@ -537,8 +535,9 @@ void audio_btConnect() {
   btLoadSavedAddr();
   a2dp.set_on_connection_state_changed(onBtConnectionState);
   a2dp.set_ssid_callback(onSsidMatchSaved);
+  a2dp.set_auto_reconnect(true); // library-native fast reconnect to the last device
   btAttemptStartMs = millis();
-  btQuickConnectDone = false;
+  btQuickConnectDone = true;
   // Same call the earlier (working) firmware used for Bluetooth tone output.
   a2dp.start(btName, btDataCallback); // returns quickly; the connection completes in the background
   g_btStarted = true;
@@ -557,7 +556,8 @@ uint32_t audio_btStatusChanges() { return btStatusChanges; }
 void audio_btRetry() {
   if (!g_btStarted || a2dp.is_connected()) return;
   btAttemptStartMs = millis();
-  if (btSavedAddrValid) a2dp.connect_to(btSavedAddr);
+  a2dp.cancel_discovery();
+  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0); // library connects when it sees the saved name
 }
 bool audio_btStarted() { return g_btStarted; }
 bool audio_btIsConnected() { return g_btStarted && a2dp.is_connected(); }
@@ -610,11 +610,15 @@ void audio_btConnectToScanResult(int idx) {
   strncpy(btName, scanResults[idx], sizeof(btName) - 1);
   btName[sizeof(btName) - 1] = 0;
   btSaveAddr(scanAddrs[idx]);
-  a2dp.set_ssid_callback(onSsidMatchSaved); // if the direct connect misses, discovery finds it by name
+  // Let the library make the connection itself: search again, and the
+  // name-match callback tells it "this one" when the device shows up.
+  a2dp.set_ssid_callback(onSsidMatchSaved);
+  a2dp.set_auto_reconnect(true);
   btAttemptStartMs = millis();
   btQuickConnectDone = true;
   btEverConnected = false;
-  a2dp.connect_to(scanAddrs[idx]);
+  delay(300); // let the cancelled search wind down
+  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
 }
 void audio_btStopScan() { if (g_btStarted) a2dp.cancel_discovery(); }
 bool audio_btIsScanning() { return g_scanning; }
