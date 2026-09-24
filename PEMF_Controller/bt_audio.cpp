@@ -560,7 +560,11 @@ const char* audio_soundscapeFile() { return currentPath; }
 // 55% lands on the speaker level that sounded right in testing.
 static uint8_t btSpeakerVolumeFor(uint8_t percent) {
   if (percent == 0) return 0;
-  float v = 127.0f * powf(percent / 100.0f, 0.25f); // louder start: 55% -> ~86% of the speaker's range
+  // 55% -> 109 (the level that tested right). Below that it falls off in a
+  // straight line so low settings are truly quiet (5% -> 10); above it rises
+  // gently to the speaker's maximum.
+  float v = (percent <= 55) ? 109.0f * percent / 55.0f
+                            : 109.0f + (percent - 55) * (18.0f / 45.0f);
   return v > 127.0f ? 127 : (uint8_t)v;
 }
 
@@ -575,7 +579,7 @@ void audio_setVolume(uint8_t percent) {
     // keeps the top clean). 0% = silent.
     if (percent == 0) g_volume = 0.0f;
     else {
-      float db = (percent <= 55) ? (percent - 55) * 0.45f : (percent - 55) * 0.15f;
+      float db = (percent <= 55) ? (percent - 55) * 0.7f : (percent - 55) * 0.15f; // 5% is ~35 dB below 55%
       g_volume = powf(10.0f, (db + 6.0f) / 20.0f); // +6 dB: the onboard speaker was too quiet at every setting
     }
   }
