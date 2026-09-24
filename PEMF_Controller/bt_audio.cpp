@@ -40,6 +40,8 @@ static volatile AudioOutput g_output = AUDIO_OUT_SPEAKER;
 static volatile AudioSource g_source = AUDIO_SRC_OFF;
 static volatile float g_toneHz = 10.0f;
 static volatile float g_volume = 0.6f;
+static volatile uint8_t g_volumePercent = 55; // what the person set, 0-100
+static volatile bool btVolumeDirty = true;       // speaker volume needs re-sending
 static volatile bool g_headphones = false;
 
 static unsigned long g_underruns = 0;
@@ -478,9 +480,10 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 
 static void btService() {
   if (!g_btStarted) return;
-  if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(100); // ~80% of the speaker's range - higher drives small speakers into distortion
+  if ((!btVolumeSent || btVolumeDirty) && a2dp.is_connected()) {
+    a2dp.set_volume(btSpeakerVolumeFor(g_volumePercent));
     btVolumeSent = true;
+    btVolumeDirty = false;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
 
@@ -524,6 +527,7 @@ void audio_begin() {
 void audio_setOutput(AudioOutput out) {
   if (out == AUDIO_OUT_SPEAKER && !g_speakerReady) speakerInit();
   g_output = out;
+  audio_setVolume(g_volumePercent); // the volume scale differs per output
 }
 AudioOutput audio_getOutput() { return g_output; }
 
@@ -546,11 +550,31 @@ bool audio_setSoundscapeFile(const char* path) {
 }
 const char* audio_soundscapeFile() { return currentPath; }
 
+
+// Bluetooth: the volume buttons drive the SPEAKER's own volume (clear, audible
+// steps, no distortion) while our signal stays at the level that tested clean.
+// 55% lands on the speaker level that sounded right in testing.
+static uint8_t btSpeakerVolumeFor(uint8_t percent) {
+  if (percent == 0) return 0;
+  float v = 127.0f * powf(percent / 100.0f, 0.4f);
+  return v > 127.0f ? 127 : (uint8_t)v;
+}
+
 void audio_setVolume(uint8_t percent) {
   if (percent > 100) percent = 100;
-  // 55% = the level that sounded right in testing; 100% is ~5 dB louder.
-  // Anything that would clip is softened by the limiter in renderFrames().
-  g_volume = percent / 55.0f;
+  g_volumePercent = percent;
+  btVolumeDirty = true; // sent to the speaker by btService()
+  if (g_output == AUDIO_OUT_BLUETOOTH) {
+    g_volume = percent == 0 ? 0.0f : 1.0f;
+  } else {
+    // Onboard speaker: ~2 dB per 5% step below 55%, gentler above (limiter
+    // keeps the top clean). 0% = silent.
+    if (percent == 0) g_volume = 0.0f;
+    else {
+      float db = (percent <= 55) ? (percent - 55) * 0.45f : (percent - 55) * 0.15f;
+      g_volume = powf(10.0f, db / 20.0f);
+    }
+  }
 }
 
 void audio_setHeadphonesMode(bool on) { g_headphones = on; }

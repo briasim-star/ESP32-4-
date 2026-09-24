@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.6.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.6.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -122,10 +122,12 @@ PinPurpose pinPurpose = PIN_DEV_MODE;
 // number maps 1:1 to actual output. Developer Mode auto-relocks after
 // DEV_MODE_TIMEOUT_MIN minutes, and always relocks on power-off since
 // it is never written to flash - only kept in RAM.
-static const float LOCKED_CEILING_FRAC = 0.45f;
+static const float LOCKED_CEILING_FRAC = 0.40f;   // normal use: the 1-100% on screen maps to 0-40% real output
+static const float DEVMODE_CEILING_FRAC = 0.80f;  // Developer Mode: maps to 0-80% (never 100% - no coil temperature sensing yet)
 static const unsigned long DEV_MODE_TIMEOUT_MIN = 60;
 static const char* DEV_MODE_PASSWORD = "5882300";
 bool devModeUnlocked = false;
+bool devModeJustUnlocked = false;
 unsigned long devModeStartMillis = 0;
 
 Category currentCategory = CAT_BONE_JOINT;
@@ -187,7 +189,7 @@ const char* favsNamespaceForActivePerson() {
 // Returns the real coil intensity percent, applying the safety rescale
 // unless Developer Mode is currently unlocked.
 uint8_t actualIntensityPercent() {
-  if (devModeUnlocked) return (uint8_t)powerDisplay;
+  if (devModeUnlocked) return (uint8_t)round(powerDisplay * DEVMODE_CEILING_FRAC);
   return (uint8_t)round(powerDisplay * LOCKED_CEILING_FRAC);
 }
 
@@ -1035,7 +1037,7 @@ void drawManagePeopleScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Manage People", 20, 14);
+  tft.drawString("< Manage People", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -1070,6 +1072,7 @@ void drawManagePeopleScreen() {
 }
 
 void handleManagePeopleTouch(int x, int y) {
+  if (y < 40 && x < 300) { personToRemove = -1; screen = SCR_SETTINGS; return; } // "< Manage People" = back
   if (handleHomeTouch(x, y)) {
     personToRemove = -1;
     return;
@@ -1358,7 +1361,7 @@ bool pinWrongFlash = false;
 // same forward-declaration reason described there.
 
 Rect pinKeyRects[12];
-Rect pinCancelBtn = {20, 200, 200, 46};
+Rect pinCancelBtn = {20, 256, 200, 42};
 const char* PIN_KEY_LABELS[12] = {"1","2","3","4","5","6","7","8","9","<","0","OK"};
 
 void startPinEntry(PinPurpose purpose) {
@@ -1382,10 +1385,10 @@ void drawPinScreen() {
   drawFittedText(20, 16, 226, title, titleFont, TFT_WHITE, COLOR_BG);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  const char* subtitle = (pinPurpose == PIN_DEV_MODE) ? "Required to exceed the 45% ceiling" :
+  const char* subtitle = (pinPurpose == PIN_DEV_MODE) ? "Trained users only. Unlocks up to 80% power for 60 min. Coils can get hot: check the coil by hand often and stop if warm. Never use where skin can't feel heat." :
                          (pinPurpose == PIN_SET_LOGIN) ? "Choose a PIN staff will use to log in" :
                                                           "Staff PIN required to use this device";
-  drawWrappedText(20, 48, 226, subtitle, FONT_SM, COLOR_TEXT_DIM, COLOR_BG, 20);
+  int afterText = drawWrappedText(20, 46, 226, subtitle, FONT_SM, pinPurpose == PIN_DEV_MODE ? COLOR_WARN : COLOR_TEXT_DIM, COLOR_BG, 19);
 
   char mask[11] = "";
   for (int i = 0; i < pinLen; i++) {
@@ -1399,7 +1402,7 @@ void drawPinScreen() {
   mask[pinLen] = 0;
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(pinWrongFlash ? COLOR_DANGER : TFT_WHITE, COLOR_BG);
-  tft.drawString(pinLen > 0 ? mask : "-", 20, 104);
+  tft.drawString(pinLen > 0 ? mask : "-", 20, afterText + 6 > 104 ? afterText + 6 : 104);
   pinWrongFlash = false;
 
   int gx = 256, gy = 24, cellW = 64, cellH = 44, gap = 8; // right column; left column stays clear for the title
@@ -1426,6 +1429,7 @@ void handlePinTouch(int x, int y) {
           if (strcmp(pinBuf, DEV_MODE_PASSWORD) == 0) {
             devModeUnlocked = true;
             devModeStartMillis = millis();
+            devModeJustUnlocked = true; // Settings shows a one-time confirmation banner
             pinLen = 0; pinBuf[0] = 0;
             if (waveform_isRunning()) waveform_setIntensity(actualIntensityPercent());
             screen = SCR_SETTINGS;
@@ -1841,6 +1845,14 @@ void drawSettingsScreen() {
     drawButton(btnSetPrev, "< Prev");
     drawButton(btnSetNext, "Next >");
   }
+
+  if (devModeJustUnlocked) { // one-time confirmation right after the PIN
+    devModeJustUnlocked = false;
+    Rect t = {20, 200, 440, 46};
+    drawChamfer(t, tft.color565(90, 54, 6), MADD_SPECTRUM[0]);
+    drawFittedText(34, 206, 412, "Developer power unlocked: up to 80% for 60 min.", FONT_SM, MADD_TEXT, MADD_PANEL);
+    drawFittedText(34, 226, 412, "Check the coil for heat often. Relocks at power-off.", FONT_SM, MADD_TEXT, MADD_PANEL);
+  }
 }
 
 void handleSettingsTouch(int x, int y) {
@@ -1905,7 +1917,7 @@ void drawLogScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Session Log", 20, 12);
+  tft.drawString("< Session Log", 20, 12);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -1934,7 +1946,8 @@ void drawLogScreen() {
 }
 
 void handleLogTouch(int x, int y) {
-  handleHomeTouch(x, y);
+  if (handleHomeTouch(x, y)) return;
+  if (y < 40 && x < 300) screen = SCR_SETTINGS; // "< Session Log" = back to Settings
 }
 
 // ---------------------------------------------------------------------
@@ -1955,7 +1968,7 @@ void drawBtScanScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Bluetooth Device", 20, 12);
+  tft.drawString("< Bluetooth Device", 20, 12);
   drawHomeButton();
   drawBtStatusLine(20, 38, 330);
 
@@ -2010,9 +2023,10 @@ void drawBtScanScreen() {
 }
 
 void handleBtScanTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) {
+  if (handleHomeTouch(x, y) || (y < 34 && x < 300)) {
     if (audio_btIsScanning()) audio_btStopScan();
     scanRequested = false;
+    if (y < 34 && x < 300) screen = SCR_SETTINGS; // "< Bluetooth Device" = back to Settings
     return;
   }
   if (touchInRect(x, y, btnScanToggle)) {
@@ -2231,7 +2245,7 @@ void drawUpdateScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Check for Updates", 20, 14);
+  tft.drawString("< Check for Updates", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -2267,6 +2281,7 @@ void drawUpdateScreen() {
 }
 
 void handleUpdateTouch(int x, int y) {
+  if (y < 40 && x < 300) { otaChecked = false; screen = SCR_SETTINGS; return; } // "< Check for Updates" = back
   if (handleHomeTouch(x, y)) {
     otaChecked = false; // reset so re-entering this screen starts fresh
     return;
@@ -2311,6 +2326,24 @@ void handleUpdateTouch(int x, int y) {
   }
 }
 
+// Leaves a result on screen until the person taps (or 20 s pass), so a
+// message never flashes by before it can be read.
+void waitForTapOrTimeout(unsigned long ms) {
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Tap the screen to continue", 240, 230);
+  tft.setTextDatum(TL_DATUM);
+  uint16_t x, y;
+  while (tft.getTouch(&x, &y)) delay(20); // ignore a finger already down
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    if (tft.getTouch(&x, &y)) break;
+    delay(20);
+  }
+  while (tft.getTouch(&x, &y)) delay(20); // wait for release so it isn't read as a tap on the next screen
+}
+
 // Runs from setup() when "Check for Updates" was tapped: check, and install
 // if a newer version is published. Shows plain progress the whole time.
 void runPendingUpdateCheck() {
@@ -2345,7 +2378,7 @@ void runPendingUpdateCheck() {
       snprintf(v, sizeof(v), "You have the latest version (%s)", FIRMWARE_VERSION);
       show("You're up to date", v);
     }
-    delay(3000);
+    waitForTapOrTimeout(20000);
     return;
   }
   char msg[48];
@@ -2356,7 +2389,7 @@ void runPendingUpdateCheck() {
   ota_downloadAndInstall(); // restarts into the new version on success
   esp_task_wdt_delete(NULL);
   show("Update didn't finish", ota_lastErrorMessage());
-  delay(3500);
+  waitForTapOrTimeout(20000);
 }
 
 // ---------------------------------------------------------------------

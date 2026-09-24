@@ -177,12 +177,14 @@ static void wifiOff() {
 
 bool ota_checkForUpdate() {
   bool r = checkForUpdateImpl();
+  Serial.printf("[OTA] check: newer=%d latest='%s' running='%s' error='%s'\n", r, latestVersion, FIRMWARE_VERSION, lastError);
   wifiOff();
   return r;
 }
 
 bool ota_downloadAndInstall() {
   bool r = downloadAndInstallImpl(); // restarts on success
+  Serial.printf("[OTA] install failed: '%s'\n", lastError);
   wifiOff();
   return r;
 }
