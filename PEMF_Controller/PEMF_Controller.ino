@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.7.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.7.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -3620,7 +3620,36 @@ void setup() {
   bool haveValidCal = prefs.isKey("calInset");
   if (haveValidCal) prefs.getBytes("calInset", calData, sizeof(calData));
   prefs.end();
-  bool forceCal = tft.getTouchRawZ() > 350;
+  // Recalibrate only on a deliberate press-and-RELEASE at power-on. Something
+  // pressing constantly (e.g. a bezel resting on the touch film) never
+  // releases - that gets a clear warning instead of a bad calibration.
+  bool forceCal = false;
+  if (tft.getTouchRawZ() > 350) {
+    tft.fillScreen(COLOR_BG);
+    tft.setFreeFont(FONT_LG);
+    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Release to recalibrate touch", 240, 150);
+    tft.setTextDatum(TL_DATUM);
+    unsigned long t0 = millis();
+    while (millis() - t0 < 6000) {
+      if (tft.getTouchRawZ() <= 350) { forceCal = true; break; }
+      delay(20);
+    }
+    if (!forceCal) {
+      tft.fillScreen(COLOR_BG);
+      tft.setFreeFont(FONT_LG);
+      tft.setTextColor(COLOR_WARN, COLOR_BG);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Something is pressing the screen", 240, 140);
+      tft.setFreeFont(FONT_SM);
+      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.drawString("Check that the bezel is not touching the display.", 240, 175);
+      tft.setTextDatum(TL_DATUM);
+      delay(4000);
+      splashOnScreen = false;
+    }
+  }
   if (haveValidCal && !forceCal) {
     tft.setTouch(calData);
   } else {
@@ -3647,6 +3676,21 @@ void loop() {
   uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
   serviceBootButton();
+
+  // A "touch" held for 4+ seconds is almost always something pressing the
+  // screen (a bezel on the touch film), which blocks every real tap. Say so.
+  static unsigned long touchDownSince = 0;
+  static bool stuckShown = false;
+  if (touched) {
+    if (!touchDownSince) touchDownSince = millis();
+    if (!stuckShown && millis() - touchDownSince > 4000) {
+      drawBootBanner("Screen is being pressed - check the bezel", COLOR_WARN);
+      stuckShown = true;
+    }
+  } else {
+    touchDownSince = 0;
+    if (stuckShown) { stuckShown = false; fullRedrawRequested = true; }
+  }
 
   if (screen == SCR_WIFI_SETUP && wifitime_isPortalActive()) {
     if (wifitime_processPortal()) {

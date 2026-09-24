@@ -519,9 +519,20 @@ static void btService() {
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
 
-  // Note: never call a2dp.connect_to() from here. The library only starts
-  // the audio stream for connections its own state machine made; a
-  // connection made around it shows "connected" but plays nothing.
+  // Faster reconnect. At start() the library already tries the last speaker,
+  // but that first try usually fires before the radio is ready and fails
+  // silently; its next try is 10 s later (fixed heartbeat). One extra try at
+  // 1.5 s - while the library is STILL in its "connecting" state, so the
+  // connection is accepted by its state machine and audio starts normally.
+  // (Calling connect_to() at other times breaks audio - see bt_audio notes.)
+  if (!btQuickConnectDone && millis() - btAttemptStartMs > 1500) {
+    btQuickConnectDone = true;
+    if (!a2dp.is_connected() && a2dp.has_last_connection()) {
+      Serial.printf("[BT] quick retry at %lu ms\n", millis());
+      esp_bd_addr_t* last = a2dp.get_last_peer_address();
+      a2dp.connect_to(*last);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +649,8 @@ void audio_btConnect() {
   a2dp.set_ssid_callback(onSsidMatchSaved);
   a2dp.set_auto_reconnect(true); // library-native fast reconnect to the last device
   btAttemptStartMs = millis();
-  btQuickConnectDone = true;
+  btQuickConnectDone = false; // allow the one early retry in btService()
+  Serial.printf("[BT] start at %lu ms\n", millis());
   // Same call the earlier (working) firmware used for Bluetooth tone output.
   a2dp.start(btName, btDataCallback); // returns quickly; the connection completes in the background
   g_btStarted = true;
