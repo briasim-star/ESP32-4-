@@ -513,11 +513,22 @@ static void btService() {
   // speakers honour this; some ignore it and keep their own last volume).
   // Our own volume control works in the sound itself, so it works on
   // every speaker either way.
-  if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(120);
-    btVolumeSent = true;
+  // Many speakers report their OWN remembered volume right after connecting,
+  // which overrides ours (so sound only appeared after pressing the
+  // speaker's volume-up). So: send at connect, again 2.5 s later once the
+  // speaker has reported, and again whenever a sound starts playing.
+  static unsigned long connectedAt = 0;
+  static bool resent = false;
+  static AudioSource lastSrc = AUDIO_SRC_OFF;
+  if (a2dp.is_connected()) {
+    if (!btVolumeSent) { a2dp.set_volume(120); btVolumeSent = true; connectedAt = millis(); resent = false; }
+    if (!resent && millis() - connectedAt > 2500) { a2dp.set_volume(120); resent = true; }
+    AudioSource src = g_source;
+    if (src != AUDIO_SRC_OFF && lastSrc == AUDIO_SRC_OFF) a2dp.set_volume(120);
+    lastSrc = src;
+  } else {
+    btVolumeSent = false;
   }
-  if (!a2dp.is_connected()) btVolumeSent = false;
 
   // Faster reconnect. At start() the library already tries the last speaker,
   // but that first try usually fires before the radio is ready and fails

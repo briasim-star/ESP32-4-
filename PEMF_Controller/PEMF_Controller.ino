@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -2938,8 +2938,7 @@ void beginSessionNow() {
   sessionStartMillis = millis();
   sessionTimerArmed = (timerMinutes > 0);
   audio_chime(660.0f, 700);  // brighter bell = "starting"
-  cymaticsView = true;       // the sand plate comes alive as the session begins
-  fullRedrawRequested = true;
+  runControlsDirty = true;   // (Cymatics view no longer switches on by itself - owner's call)
 }
 
 void updateProgram() {
@@ -3379,12 +3378,6 @@ void endSession() {
 void handleRunTouch(int x, int y) {
   if (sessionCompleteShow) { // any tap closes the summary card
     sessionCompleteShow = false;
-    fullRedrawRequested = true;
-    return;
-  }
-  // Tap the plate / hexagon to switch between the Cymatics view and the timer view.
-  if (x >= 20 && x <= 205 && y >= 56 && y <= 250) {
-    cymaticsView = !cymaticsView;
     fullRedrawRequested = true;
     return;
   }
