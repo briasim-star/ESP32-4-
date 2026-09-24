@@ -34,11 +34,40 @@ static void setMarkedConfigured(bool val) {
   p.end();
 }
 
-// UTC - session log timestamps are relative anyway (date + rough time),
-// so timezone offset isn't wired in here to keep this simple; can be
-// added later as a Settings field if that turns out to matter.
+// Time zones (Settings -> Time zone). POSIX rules include daylight saving.
+static const char* TZ_NAMES[] = {"Eastern", "Central", "Mountain", "Arizona", "Pacific", "Alaska", "Hawaii",
+                                 "Atlantic", "UTC", "UK", "Central Europe", "Australia East"};
+static const char* TZ_RULES[] = {"EST5EDT,M3.2.0,M11.1.0", "CST6CDT,M3.2.0,M11.1.0", "MST7MDT,M3.2.0,M11.1.0", "MST7",
+                                 "PST8PDT,M3.2.0,M11.1.0", "AKST9AKDT,M3.2.0,M11.1.0", "HST10", "AST4ADT,M3.2.0,M11.1.0",
+                                 "UTC0", "GMT0BST,M3.5.0/1,M10.5.0", "CET-1CEST,M3.5.0,M10.5.0/3", "AEST-10AEDT,M10.1.0,M4.1.0/3"};
+static const int TZ_COUNT = sizeof(TZ_NAMES) / sizeof(TZ_NAMES[0]);
+static int g_tz = 0;
+
+int wifitime_tzCount() { return TZ_COUNT; }
+int wifitime_tzIndex() { return g_tz; }
+const char* wifitime_tzName(int i) { return (i >= 0 && i < TZ_COUNT) ? TZ_NAMES[i] : "UTC"; }
+void wifitime_setTz(int i) {
+  if (i < 0 || i >= TZ_COUNT) i = 0;
+  g_tz = i;
+  setenv("TZ", TZ_RULES[i], 1);
+  tzset();
+  Preferences p;
+  p.begin(WIFI_NS, false);
+  p.putInt("tz", i);
+  p.end();
+}
+void wifitime_loadTz() {
+  Preferences p;
+  p.begin(WIFI_NS, true);
+  g_tz = p.getInt("tz", 0);
+  p.end();
+  if (g_tz < 0 || g_tz >= TZ_COUNT) g_tz = 0;
+  setenv("TZ", TZ_RULES[g_tz], 1);
+  tzset();
+}
+
 static bool doNtpSync(unsigned long timeoutMs) {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  configTzTime(TZ_RULES[g_tz], "pool.ntp.org", "time.nist.gov");
   struct tm timeinfo;
   unsigned long start = millis();
   while (!getLocalTime(&timeinfo, 100)) {
@@ -57,12 +86,13 @@ void wifitime_begin() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(); // reconnects using the ESP32's own saved credentials
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 6000) { // runs before Bluetooth starts - keep it short
     delay(100);
   }
   if (WiFi.status() == WL_CONNECTED) {
-    g_timeSynced = doNtpSync(5000);
+    g_timeSynced = doNtpSync(3000);
   }
+  Serial.printf("[TIME] clock %s after %lu ms\n", g_timeSynced ? "set" : "not set", millis() - start);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 }

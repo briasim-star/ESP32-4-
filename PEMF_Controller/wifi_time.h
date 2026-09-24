@@ -32,3 +32,10 @@ void wifitime_onConnecting(void (*cb)()); // called just before connecting to th
 void wifitime_forgetNetwork();       // clears saved credentials, same tap-twice-confirm pattern as elsewhere
 bool wifitime_hasRealTime();         // true once NTP sync has succeeded this session
 time_t wifitime_now();               // current real epoch time, or 0 if never synced
+
+// Time zone (Settings -> Time zone), saved; applies daylight saving automatically.
+void wifitime_loadTz();              // call once early in setup()
+int wifitime_tzCount();
+int wifitime_tzIndex();
+const char* wifitime_tzName(int i);
+void wifitime_setTz(int i);

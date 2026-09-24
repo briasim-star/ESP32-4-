@@ -44,6 +44,7 @@
 #include <nvs_flash.h>
 #include <driver/gpio.h>
 #include <esp_sleep.h>
+#include <SD.h>
 
 // Set this to false if you don't want to build/wire the Bluetooth audio
 // feature at all (skips linking the A2DP library's Bluetooth stack).
@@ -53,7 +54,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -265,7 +266,12 @@ struct LogEntry {
   float freqHz;
   int durationMin;
   time_t timestamp; // 0 if WiFi/NTP was never set up when this entry was logged
+  uint8_t feelBefore, feelAfter; // check-in 1-5, 0 = not answered
 };
+uint8_t pendingFeelBefore = 0;   // answered before Start, stored with the next log entry
+bool lastSessionLogged = false;  // true once this session's entry exists (so the after-score lands on it)
+bool csvPending = false;         // this session's SD history line is written once the after-score is known
+void flushPendingCsv();          // writes the SD history line (defined with the check-in screens)
 LogEntry sessionLog[LOG_SIZE];
 int logCount = 0; // how many of the 5 slots are actually filled
 unsigned long lifetimeSessionCount = 0; // every session ever completed, not just the last 5
@@ -282,6 +288,11 @@ void loadSessionLog() {
     snprintf(freqKey, sizeof(freqKey), "q%d", i);
     snprintf(durKey, sizeof(durKey), "d%d", i);
     snprintf(tsKey, sizeof(tsKey), "t%d", i);
+    char bKey[8], aKey[8];
+    snprintf(bKey, sizeof(bKey), "b%d", i);
+    snprintf(aKey, sizeof(aKey), "a%d", i);
+    sessionLog[i].feelBefore = p.getUChar(bKey, 0);
+    sessionLog[i].feelAfter = p.getUChar(aKey, 0);
     String n = p.getString(nameKey, "");
     strncpy(sessionLog[i].name, n.c_str(), sizeof(sessionLog[i].name) - 1);
     sessionLog[i].name[sizeof(sessionLog[i].name) - 1] = 0;
@@ -304,6 +315,11 @@ void saveSessionLog() {
     snprintf(freqKey, sizeof(freqKey), "q%d", i);
     snprintf(durKey, sizeof(durKey), "d%d", i);
     snprintf(tsKey, sizeof(tsKey), "t%d", i);
+    char bKey[8], aKey[8];
+    snprintf(bKey, sizeof(bKey), "b%d", i);
+    snprintf(aKey, sizeof(aKey), "a%d", i);
+    p.putUChar(bKey, sessionLog[i].feelBefore);
+    p.putUChar(aKey, sessionLog[i].feelAfter);
     p.putString(nameKey, sessionLog[i].name);
     p.putFloat(freqKey, sessionLog[i].freqHz);
     p.putInt(durKey, sessionLog[i].durationMin);
@@ -317,13 +333,19 @@ void saveSessionLog() {
 // Pushes a new entry to the front, dropping the oldest once full.
 void addLogEntry(const char* name, float freqHz, int durationMin) {
   if (durationMin < 1) return; // skip near-instant taps, not real sessions
-  int n = (logCount < LOG_SIZE) ? logCount + 1 : LOG_SIZE;
+  flushPendingCsv(); // an older session's SD line still waiting for its after-score
+  int n =(logCount < LOG_SIZE) ? logCount + 1 : LOG_SIZE;
   for (int i = n - 1; i > 0; i--) sessionLog[i] = sessionLog[i - 1];
   strncpy(sessionLog[0].name, name, sizeof(sessionLog[0].name) - 1);
   sessionLog[0].name[sizeof(sessionLog[0].name) - 1] = 0;
   sessionLog[0].freqHz = freqHz;
   sessionLog[0].durationMin = durationMin;
   sessionLog[0].timestamp = wifitime_now(); // 0 if WiFi/NTP was never set up
+  sessionLog[0].feelBefore = pendingFeelBefore;
+  sessionLog[0].feelAfter = 0;
+  pendingFeelBefore = 0;
+  lastSessionLogged = true;
+  csvPending = true;
   logCount = n;
   lifetimeSessionCount++;
   lifetimeMinutes += durationMin;
@@ -589,6 +611,63 @@ void topStatusText(char* buf, size_t len) {
 // sound goes ("X20" / "Speaker"). Dot: green = connected, amber = working
 // on it or not found, cyan = device speaker.
 char lastTopStatus[24] = "";
+int topBadgeX = 302;          // left edge of the status badge (the clock sits just left of it)
+char homeClockText[16] = "";  // what the Home clock last drew ("" = redraw)
+
+// Backlight brightness 0-255 (LEDC channel 4 - the coil uses 0 and 1).
+// Power-off switches the pin back to plain GPIO so it can be held low.
+static const int BL_CHANNEL = 4;
+bool blPwm = false;
+void setBacklight(uint8_t level) {
+  if (!blPwm) { ledcSetup(BL_CHANNEL, 5000, 8); ledcAttachPin(TFT_BL, BL_CHANNEL); blPwm = true; }
+  ledcWrite(BL_CHANNEL, level);
+}
+void backlightToGpio(bool on) {
+  if (blPwm) { ledcDetachPin(TFT_BL); blPwm = false; }
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, on ? HIGH : LOW);
+}
+
+// "Thu 9:41 PM" / "9:41 PM" - false when the clock isn't known yet.
+bool clockText(char* buf, size_t len, bool withDay) {
+  if (!wifitime_hasRealTime()) return false;
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  static const char* DAYS[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  int h = t.tm_hour % 12;
+  if (h == 0) h = 12;
+  if (withDay) snprintf(buf, len, "%s %d:%02d %s", DAYS[t.tm_wday], h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+  else snprintf(buf, len, "%d:%02d %s", h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+  return true;
+}
+int localHour() { // 0-23, or -1 when the clock isn't known
+  if (!wifitime_hasRealTime()) return -1;
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  return t.tm_hour;
+}
+
+// Home top bar: day and time between the title and the status badge.
+void drawHomeClock() {
+  char buf[16];
+  if (!clockText(buf, sizeof(buf), true)) return;
+  if (strcmp(buf, homeClockText) == 0) return;
+  tft.setFreeFont(FONT_LG);
+  int x0 = 56 + tft.textWidth("MADD PEMF") + 12;
+  int x1 = topBadgeX - 10;
+  if (x1 - x0 < 40) return;
+  tft.setFreeFont(FONT_SM);
+  if (tft.textWidth(buf) > x1 - x0) clockText(buf, sizeof(buf), false); // no room for the day
+  fillAurora(x0, 8, x1 - x0, 24);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(MADD_TEXT);
+  tft.drawString(buf, x1, 13);
+  tft.setTextDatum(TL_DATUM);
+  clockText(homeClockText, sizeof(homeClockText), true);
+}
+
 void drawTopStatus(bool force) {
   char key[24];
   topStatusText(key, sizeof(key));
@@ -606,6 +685,8 @@ void drawTopStatus(bool force) {
   int w = tft.textWidth(label) + 34;
   if (w > 160) w = 160;
   Rect r = {462 - w, 7, w, 26};
+  topBadgeX = r.x;
+  homeClockText[0] = 0; // the Home clock re-lays itself out next to the badge
   drawChamfer(r, MADD_PANEL, MADD_EDGE, 6);
   tft.fillCircle(r.x + 13, r.y + 13, 4, dot);
   drawFittedText(r.x + 24, r.y + 5, w - 30, label, FONT_SM, MADD_TEXT, MADD_PANEL);
@@ -625,9 +706,12 @@ void drawTopBar(const char* title, bool showBack, bool showHome = false) {
 }
 
 
+bool checkInEnabled = true; // "How do you feel?" before/after sessions (Settings -> Check-in)
+
 void loadSetupInfo() {
   Preferences p;
   p.begin("setup", true);
+  checkInEnabled = p.getBool("checkin", true);
   setupDone = p.getBool("done", false);
   isWellnessCenter = p.getBool("wellness", false);
   requireLoginPassword = p.getBool("reqLogin", false);
@@ -672,6 +756,7 @@ void saveSetupInfo() {
   p.putUChar("audioOut", (uint8_t)audioOutputPref);
   p.putUChar("sndMode", (uint8_t)sessionSoundMode);
   p.putInt("vol2", volumePercent);
+  p.putBool("checkin", checkInEnabled);
   p.end();
 
   Preferences rp;
@@ -1549,7 +1634,7 @@ void powerOff() {
   endSession();
   audio_setSource(AUDIO_SRC_OFF);
   { Preferences sp; sp.begin("sleepnight", false); sp.putInt("left", 0); sp.end(); } // turning off on purpose ends a Sleep Night
-  digitalWrite(TFT_BL, HIGH);
+  backlightToGpio(true);
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
@@ -1638,6 +1723,8 @@ int buildVisibleSettingsItems(SettingsItemId* out) {
   out[n++] = SET_ROOM_OR_PEOPLE;
   if (!isWellnessCenter && peopleCount() > 0) out[n++] = SET_SWITCH_USER;
   out[n++] = SET_WIFI;
+  out[n++] = SET_TIMEZONE;
+  out[n++] = SET_CHECKIN;
   out[n++] = SET_VIEW_LOG;
   if (sdmedia_isAvailable() && sdmedia_soundscapeCount() > 0) out[n++] = SET_SOUNDSCAPES;
   out[n++] = SET_RECAL_TOUCH;
@@ -1709,6 +1796,13 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       break;
     case SET_RECAL_TOUCH:
       snprintf(labelOut, labelLen, "Recalibrate Touch");
+      break;
+    case SET_TIMEZONE:
+      snprintf(labelOut, labelLen, "Time zone: %s", wifitime_tzName(wifitime_tzIndex()));
+      break;
+    case SET_CHECKIN:
+      snprintf(labelOut, labelLen, checkInEnabled ? "Check-in: On" : "Check-in: Off");
+      *activeOut = checkInEnabled;
       break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed && millis() - factoryResetArmedAt > FACTORY_RESET_ARM_WINDOW_MS) factoryResetArmed = false;
@@ -1797,6 +1891,15 @@ void handleSettingsItemTap(SettingsItemId id) {
       break;
     case SET_RECAL_TOUCH:
       runTouchCalibration(); // blocking; Settings redraws right after
+      screen = SCR_SETTINGS;
+      break;
+    case SET_TIMEZONE: // each tap moves to the next zone
+      wifitime_setTz((wifitime_tzIndex() + 1) % wifitime_tzCount());
+      screen = SCR_SETTINGS;
+      break;
+    case SET_CHECKIN:
+      checkInEnabled = !checkInEnabled;
+      saveSetupInfo();
       screen = SCR_SETTINGS;
       break;
     case SET_FACTORY_RESET:
@@ -1949,6 +2052,14 @@ void drawLogScreen() {
       char dateBuf[24];
       strftime(dateBuf, sizeof(dateBuf), "%b %d, %Y %H:%M", t);
       tft.drawString(dateBuf, x, y + 42);
+    }
+    if (sessionLog[i].feelBefore || sessionLog[i].feelAfter) { // check-in scores, "-" = skipped
+      char feel[24];
+      char b = sessionLog[i].feelBefore ? (char)('0' + sessionLog[i].feelBefore) : '-';
+      char a = sessionLog[i].feelAfter ? (char)('0' + sessionLog[i].feelAfter) : '-';
+      snprintf(feel, sizeof(feel), "Felt %c then %c", b, a);
+      tft.setTextColor(MADD_CYAN, COLOR_BG);
+      tft.drawString(feel, x, y + 62);
     }
   }
 }
@@ -2431,6 +2542,10 @@ bool showDeviceStats = false;
 // ---------------------------------------------------------------------
 // Home screen: quick start, favorites, and nine color-coded tiles.
 // ---------------------------------------------------------------------
+extern bool resumeOffer;                          // defined with "Resume after power loss" further down
+extern int resumeIdx, resumeLeft, resumePwr;
+Rect btnResumeYes = {60, 180, 170, 46};
+Rect btnResumeNo  = {250, 180, 170, 46};
 Rect btnQuickStart = {18, 48, 290, 70};
 Rect btnFavorites  = {318, 48, 144, 70};
 
@@ -2455,8 +2570,18 @@ uint16_t tileColor(int idx) {
   return idx == -1 ? MADD_CYAN : MADD_DIM;
 }
 
-// Quick start = the last preset used (from the session log), or Deep Relaxation.
+// Quick start follows the time of day when the clock is known: Focus in the
+// morning, Relaxation & Sleep in the evening, your last session in between.
+// Without a clock: the last preset used, or Deep Relaxation.
+int firstPresetIn(Category c) {
+  for (int i = 0; i < NUM_BASE_PRESETS; i++)
+    if (BASE_PRESETS[i].category == c) return i;
+  return 0;
+}
 int quickStartPresetIndex() {
+  int h = localHour();
+  if (h >= 5 && h < 11) return firstPresetIn(CAT_MENTAL_COGNITIVE);
+  if (h >= 18 || (h >= 0 && h < 5)) return firstPresetIn(CAT_HEART_CIRC);
   if (logCount > 0) {
     for (int i = 0; i < NUM_BASE_PRESETS; i++)
       if (strcmp(BASE_PRESETS[i].name, sessionLog[0].name) == 0) return i;
@@ -2488,12 +2613,15 @@ void drawCoilIcon(int cx, int topY, bool bright) {
 void drawCategoryScreen() {
   drawAuroraBackground();
   drawTopBar("MADD PEMF", false);
+  drawHomeClock();
 
-  // Quick start card
+  // Quick start card - greets by time of day when the clock is known
   drawChamfer(btnQuickStart, MADD_PANEL, MADD_MAGENTA);
   drawCoilIcon(58, 60, true);
   int q = quickStartPresetIndex();
-  drawFittedText(96, 58, 200, "Quick start", FONT_LG, MADD_TEXT, MADD_PANEL);
+  int hr = localHour();
+  const char* greet = hr < 0 ? "Quick start" : (hr >= 5 && hr < 12) ? "Good morning" : (hr >= 12 && hr < 18) ? "Good afternoon" : "Good evening";
+  drawFittedText(96, 58, 200, greet, FONT_LG, MADD_TEXT, MADD_PANEL);
   char f[16], line[48];
   formatFreq(BASE_PRESETS[q].freqHz, f, sizeof(f));
   snprintf(line, sizeof(line), "%s  %s", BASE_PRESETS[q].name, f);
@@ -2510,6 +2638,21 @@ void drawCategoryScreen() {
     drawChamfer(r, MADD_PANEL, MADD_EDGE, 8);
     tft.fillRect(r.x, r.y + 8, 4, r.h - 16, tileColor(HOME_TILES[i].colorIdx));
     drawFittedText(r.x + 16, r.y + 15, r.w - 24, HOME_TILES[i].label, FONT_LG, MADD_TEXT, MADD_PANEL);
+  }
+
+  if (resumeOffer) { // power was lost mid-session
+    Rect c = {40, 90, 400, 150};
+    drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+    char line[48];
+    snprintf(line, sizeof(line), "Resume %s?", BASE_PRESETS[resumeIdx].name);
+    tft.setTextDatum(TC_DATUM);
+    drawFittedLabel(Rect{50, 100, 380, 30}, line, FONT_LG, MADD_PANEL);
+    snprintf(line, sizeof(line), "The power went out with %d min left.", resumeLeft);
+    tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+    tft.drawString(line, 240, 140);
+    tft.setTextDatum(TL_DATUM);
+    drawChamferButton(btnResumeYes, "Resume", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
+    drawChamferButton(btnResumeNo, "No thanks", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
   }
 
   if (showDeviceStats) {
@@ -2535,6 +2678,20 @@ void drawCategoryScreen() {
 }
 
 void handleCategoryTouch(int x, int y) {
+  if (resumeOffer) {
+    if (touchInRect(x, y, btnResumeYes)) {
+      resumeOffer = false;
+      clearResumePoint();
+      openPresetByIndex(resumeIdx, SCR_CATEGORY);
+      timerMinutes = resumeLeft;          // picks up with the minutes that were left
+      powerDisplay = resumePwr < 1 ? 1 : (resumePwr > 100 ? 100 : resumePwr);
+    } else if (touchInRect(x, y, btnResumeNo)) {
+      resumeOffer = false;
+      clearResumePoint();
+      fullRedrawRequested = true;
+    }
+    return;
+  }
   if (showDeviceStats) {
     showDeviceStats = false; // tap anywhere to dismiss
     return;
@@ -2940,13 +3097,95 @@ int completedMinutes = 0;
 float completedFreq = 0;
 const char* completedName = "";
 extern bool fullRedrawRequested;
-extern bool cymaticsView; // defined with the Cymatics view further down
+
+// ---- "How do you feel?" check-in (Settings -> Check-in) --------------------
+// Optional 1-5 tap before Start and after a finished session. Saved with the
+// session (Session Log + the SD card history). It's the person's own record;
+// the device makes no claims from it.
+int checkInStage = 0; // 0 = none, 1 = before Start, 2 = after a finished session
+const Rect CHK_CARD = {14, 52, 212, 196};
+const Rect chkSkip = {70, 200, 100, 36};
+Rect chkBtn(int i) { Rect r = {24 + i * 40, 124, 36, 40}; return r; }
+
+void drawCheckInCard() {
+  drawChamfer(CHK_CARD, MADD_PANEL, MADD_CYAN, 12);
+  tft.setTextDatum(TC_DATUM); tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_TEXT);
+  tft.drawString(checkInStage == 1 ? "How do you feel" : "Session complete.", 120, 68);
+  tft.drawString(checkInStage == 1 ? "right now?" : "How do you feel now?", 120, 90);
+  tft.setTextColor(MADD_DIM);
+  tft.drawString("1 = low     5 = great", 120, 172);
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < 5; i++) {
+    char l[2] = {(char)('1' + i), 0};
+    drawChamferButton(chkBtn(i), l, MADD_PANEL, MADD_SPECTRUM[5 - i], MADD_TEXT, FONT_LG);
+  }
+  drawChamferButton(chkSkip, "Skip", MADD_PANEL, MADD_EDGE, MADD_DIM);
+}
+
+// Full session history on the SD card: /madd_sessions.csv (opens in any
+// spreadsheet). Written once the session's after-score is known.
+void flushPendingCsv() {
+  if (!csvPending) return;
+  csvPending = false;
+  if (!sdmedia_isAvailable() || logCount == 0) return;
+  LogEntry& e = sessionLog[0];
+  char date[12] = "", hm[8] = "";
+  if (e.timestamp > 0) {
+    struct tm t;
+    localtime_r(&e.timestamp, &t);
+    strftime(date, sizeof(date), "%Y-%m-%d", &t);
+    strftime(hm, sizeof(hm), "%H:%M", &t);
+  }
+  const char* who = (!isWellnessCenter && activePersonIndex >= 0) ? peopleNames[activePersonIndex] : ownerName;
+  char line[128];
+  snprintf(line, sizeof(line), "%s,%s,%s,%s,%.2f,%d,%u,%u", date, hm, who, e.name, e.freqHz, e.durationMin, e.feelBefore, e.feelAfter);
+  sdmedia_lock();
+  File f = SD.open("/madd_sessions.csv", FILE_APPEND);
+  if (f) {
+    if (f.size() == 0) f.println("date,time,person,session,frequency_hz,minutes,feel_before,feel_after");
+    f.println(line);
+    f.close();
+  }
+  sdmedia_unlock();
+}
+
+// ---- Resume after power loss ------------------------------------------
+// While a timed preset session runs, the minutes left are saved once a
+// minute. If power drops, Home offers to pick it back up (the person taps
+// Start themselves - the coil never restarts on its own).
+bool resumeOffer = false;
+int resumeIdx = -1, resumeLeft = 0, resumePwr = 0;
+void saveResumePoint(int left) {
+  Preferences p;
+  p.begin("resume", false);
+  p.putInt("idx", selectedIndex);
+  p.putInt("left", left);
+  p.putInt("pwr", powerDisplay);
+  p.end();
+}
+void clearResumePoint() {
+  Preferences p;
+  p.begin("resume", false);
+  if (p.getInt("left", 0) != 0) p.putInt("left", 0);
+  p.end();
+}
+void loadResumePoint() {
+  Preferences p;
+  p.begin("resume", true);
+  resumeIdx = p.getInt("idx", -1);
+  resumeLeft = p.getInt("left", 0);
+  resumePwr = p.getInt("pwr", 10);
+  p.end();
+  resumeOffer = resumeLeft > 0 && resumeIdx >= 0 && resumeIdx < NUM_BASE_PRESETS;
+}
 
 void markSessionComplete(int mins) {
   completedMinutes = mins;
   completedFreq = selFreq;
   completedName = selName;
-  sessionCompleteShow = true;
+  clearResumePoint();
+  if (checkInEnabled && lastSessionLogged) checkInStage = 2; // "How do you feel now?" first
+  else { sessionCompleteShow = true; flushPendingCsv(); }
   runControlsDirty = true;
   audio_chime(440.0f, 1200); // lower, longer bell = "finished"
 }
@@ -3117,96 +3356,67 @@ void drawRunCoils(bool bright) {
   tft.drawEllipse(RUN_HEX_X, 233, 96, 15, b);
 }
 
-// =====================================================================
-// CYMATICS VIEW - a live "sand plate" (Chladni figure) for the session.
-// Real physics, visualised: on a vibrating plate, sand is shaken hardest
-// where the plate moves most and comes to rest on the still (nodal) lines,
-// drawing a geometric pattern. Each grain here jiggles in proportion to the
-// plate's motion at its spot, so the grains genuinely settle into the
-// pattern for the session's frequency - and re-form when a Journey changes
-// frequency. It is a visualisation of the frequency, not a field measurement.
-// RAM: 320 grains x 4 bytes = 1.3 KB (kept small - Bluetooth needs the RAM).
-// =====================================================================
-bool cymaticsView = false;
-static const int CYM_N = 320;
-static const int CYM_R = 80;
-static int16_t cymX[CYM_N], cymY[CYM_N];
-static uint32_t cymRng = 0x9E3779B9u;
-static int cymModeN = 1, cymModeM = 2;
-static int cymFrame = 0;
+// (The cymatics "sand plate" view was removed in 1.9.1 - owner found it looked broken; it had been switched off since 1.8.2.)
 
-static inline int cymRand(int span) {
-  cymRng ^= cymRng << 13; cymRng ^= cymRng >> 17; cymRng ^= cymRng << 5;
-  return (int)(cymRng % (uint32_t)(2 * span + 1)) - span;
-}
 
-// Session frequency -> plate mode (n, m). Higher frequency = more intricate figure.
-static void cymaticsModeFor(float hz, int& n, int& m) {
-  static const uint8_t pairs[12][2] = {{1,2},{1,3},{2,3},{1,4},{2,5},{3,4},{1,5},{3,5},{2,7},{4,5},{3,7},{5,6}};
-  if (hz < 0.5f) hz = 0.5f;
-  float t = logf(hz / 0.5f) / logf(2000.0f); // 0.5 Hz -> 0 ... 1 kHz -> 1
-  int k = (int)(t * 12.0f);
-  if (k < 0) k = 0;
-  if (k > 11) k = 11;
-  n = pairs[k][0];
-  m = pairs[k][1];
-}
-
-// Chladni plate displacement for mode (n, m) at x, y in -1..1.
-static inline float chladni(float x, float y) {
-  const float P = 3.14159265f;
-  return cosf(cymModeN * P * x) * cosf(cymModeM * P * y) - cosf(cymModeM * P * x) * cosf(cymModeN * P * y);
-}
-
-void drawCymaticsPlate() {
-  tft.fillCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 4, MADD_PANEL);
-  tft.drawCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 5, MADD_MAGENTA);
-  tft.drawCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 6, MADD_MAGENTA);
-  for (int i = 0; i < CYM_N; i++) { // sprinkle the sand evenly
-    int x, y;
-    do { x = cymRand(CYM_R); y = cymRand(CYM_R); } while (x * x + y * y > CYM_R * CYM_R);
-    cymX[i] = x; cymY[i] = y;
-    tft.drawPixel(RUN_HEX_X + x, RUN_HEX_Y + y, MADD_CYAN);
+// ---- Breathing pacer (Relaxation & Sleep sessions) -----------------------
+// While the coil runs, the hexagon's outline glows up over 4 s (breathe in)
+// and fades over 6 s (breathe out) - about 6 breaths a minute. Just a guide;
+// following it is optional.
+int pacerLastLevel = -1, pacerLastIn = -1;
+void drawHexEdge(int cx, int cy, int r, uint16_t edge) {
+  int px[6], py[6];
+  for (int i = 0; i < 6; i++) {
+    float a = (60.0f * i - 90.0f) * 0.0174533f;
+    px[i] = cx + (int)(r * cosf(a));
+    py[i] = cy + (int)(r * sinf(a));
+  }
+  for (int i = 0; i < 6; i++) {
+    int j = (i + 1) % 6;
+    tft.drawLine(px[i], py[i], px[j], py[j], edge);
+    tft.drawLine(px[i] + (cx - px[i]) / 30, py[i] + (cy - py[i]) / 30, px[j] + (cx - px[j]) / 30, py[j] + (cy - py[j]) / 30, edge);
   }
 }
-
-void updateCymatics() {
+uint16_t blend565(uint16_t a, uint16_t b, int k, int n) { // k/n of the way from a to b
+  int r = ((a >> 11) * (n - k) + (b >> 11) * k) / n;
+  int g = (((a >> 5) & 63) * (n - k) + ((b >> 5) & 63) * k) / n;
+  int bl = ((a & 31) * (n - k) + (b & 31) * k) / n;
+  return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+void updateBreathPacer() {
   static unsigned long last = 0;
-  if (millis() - last < 40) return; // ~25 frames a second
-  last = millis();
-  cymaticsModeFor(liveFrequency(), cymModeN, cymModeM);
-  if (!waveform_isRunning()) return; // sand rests while the coil is off
-  bool redrawAll = (++cymFrame % 12) == 0; // restore grains a neighbour may have erased
-  for (int i = 0; i < CYM_N; i++) {
-    float v = fabsf(chladni(cymX[i] / (float)CYM_R, cymY[i] / (float)CYM_R)); // 0..2
-    int step = (int)(v * 4.0f);
-    uint16_t c = v < 0.3f ? MADD_TEXT : MADD_CYAN; // settled grains glow white
-    if (step > 0) {
-      int nx = cymX[i] + cymRand(step), ny = cymY[i] + cymRand(step);
-      if (nx * nx + ny * ny <= CYM_R * CYM_R) {
-        tft.drawPixel(RUN_HEX_X + cymX[i], RUN_HEX_Y + cymY[i], MADD_PANEL);
-        cymX[i] = nx; cymY[i] = ny;
-        tft.drawPixel(RUN_HEX_X + nx, RUN_HEX_Y + ny, c);
-        continue;
-      }
-    }
-    if (redrawAll) tft.drawPixel(RUN_HEX_X + cymX[i], RUN_HEX_Y + cymY[i], c);
+  int& lastIn = pacerLastIn;
+  static bool wasOn = false;
+  bool on = waveform_isRunning() && !sessionPaused && !sessionCompleteShow &&
+            (nameHas(selCategoryName, "sleep") || nameHas(selCategoryName, "relax"));
+  if (!on) {
+    if (wasOn) { fillAurora(30, 44, 164, 17); drawHexEdge(RUN_HEX_X, RUN_HEX_Y, RUN_HEX_R, MADD_MAGENTA); wasOn = false; lastIn = -1; }
+    return;
   }
+  if (millis() - last < 120) return;
+  last = millis();
+  unsigned long ph = (millis() - sessionStartMillis) % 10000UL;
+  int in = ph < 4000 ? 1 : 0;
+  float k = in ? ph / 4000.0f : 1.0f - (ph - 4000) / 6000.0f;
+  int level = (int)(k * 10.0f + 0.5f);
+  if (level != pacerLastLevel) {
+    drawHexEdge(RUN_HEX_X, RUN_HEX_Y, RUN_HEX_R, blend565(MADD_EDGE, MADD_CYAN, level, 10));
+    pacerLastLevel = level;
+  }
+  if (in != lastIn) {
+    fillAurora(30, 44, 164, 17);
+    tft.setTextDatum(TC_DATUM); tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+    tft.drawString(in ? "Breathe in" : "Breathe out", RUN_HEX_X, 45);
+    tft.setTextDatum(TL_DATUM);
+    lastIn = in;
+  }
+  wasOn = true;
 }
 
 void drawRunHexContents(const char* timeText, const char* freqText) {
-  if (cymaticsView) { // time + frequency sit under the plate instead
-    fillAurora(14, 229, 214, 24);
-    char line[48];
-    snprintf(line, sizeof(line), "%s   %s", timeText, freqText);
-    tft.setTextDatum(TC_DATUM);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(MADD_TEXT);
-    tft.drawString(line, RUN_HEX_X, 233);
-    tft.setTextDatum(TL_DATUM);
-    return;
-  }
   drawHex(RUN_HEX_X, RUN_HEX_Y, RUN_HEX_R, MADD_PANEL, MADD_MAGENTA);
+  pacerLastLevel = -1; // the breathing pacer repaints its glow (and words) over the fresh screen
+  pacerLastIn = -1;
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(MADD_TEXT);
@@ -3281,8 +3491,7 @@ void drawRunScreen() {
   prepareSessionAudioIfNew();
   drawAuroraBackground();
   drawTopBar(selName, true);
-  if (cymaticsView) drawCymaticsPlate();
-  else drawRunCoils(true);
+  drawRunCoils(true);
   drawChamfer(runPanel, MADD_PANEL, MADD_EDGE, 12);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(MADD_DIM);
@@ -3386,11 +3595,11 @@ void refreshRunControls() {
     drawFittedText(28, 186, 184, line, FONT_SM, MADD_DIM, MADD_PANEL);
     drawFittedText(28, 216, 184, "Tap to close", FONT_SM, MADD_DIM, MADD_PANEL);
   }
+  if (checkInStage) drawCheckInCard();
 }
 
 // Pulses the coil rings in step with the session (visible up to ~4 Hz).
 void updateRunPulse() {
-  if (cymaticsView) { updateCymatics(); return; }
   static bool lastBright = true;
   bool bright = true;
   if (waveform_isRunning()) {
@@ -3407,8 +3616,9 @@ void updateRunPulse() {
 }
 
 void endSession() {
-  cymaticsView = false; // next visit opens on the timer view
   startCountdownAt = 0; // cancel a 3-2-1 in progress
+  checkInStage = 0;
+  clearResumePoint();   // ended on purpose - nothing to resume
   rampStartMs = 0;
   if (sessionForceSpeaker) { sessionForceSpeaker = false; applyAudioOutput(); } // back to the Bluetooth speaker
   if (waveform_isRunning() || sessionPaused) {
@@ -3431,7 +3641,25 @@ void handleRunTouch(int x, int y) {
     startCountdownAt = 0;
     rampStartMs = 0;
     endSession();
+    flushPendingCsv(); // stopped early: no after-score, save the history line now
     screen = runScreenOrigin;
+    return;
+  }
+  if (checkInStage) { // "How do you feel?" card is up: 1-5 or Skip (other taps wait)
+    int pick = -1;
+    for (int i = 0; i < 5; i++) if (touchInRect(x, y, chkBtn(i))) pick = i + 1;
+    if (pick < 0 && !touchInRect(x, y, chkSkip)) return;
+    if (pick < 0) pick = 0;
+    if (checkInStage == 1) {
+      pendingFeelBefore = (uint8_t)pick;
+      startCountdownAt = millis(); // on to the 3-2-1
+    } else {
+      if (lastSessionLogged && logCount > 0) { sessionLog[0].feelAfter = (uint8_t)pick; saveSessionLog(); }
+      flushPendingCsv();
+      sessionCompleteShow = true;
+    }
+    checkInStage = 0;
+    fullRedrawRequested = true;
     return;
   }
   if (selectedIndex >= 0 && touchInRect(x, y, btnFavToggle)) {
@@ -3480,7 +3708,10 @@ void handleRunTouch(int x, int y) {
     } else if (startCountdownAt) {
       startCountdownAt = 0;         // tapped "Cancel" during 3-2-1
     } else {
-      startCountdownAt = millis();  // 3-2-1, then beginSessionNow() from loop()
+      lastSessionLogged = false;
+      pendingFeelBefore = 0;
+      if (checkInEnabled) { checkInStage = 1; fullRedrawRequested = true; } // ask first, then 3-2-1
+      else startCountdownAt = millis();  // 3-2-1, then beginSessionNow() from loop()
     }
     return;
   }
@@ -3748,6 +3979,12 @@ void saveSleepNight(int minutesLeft) {
 
 void drawSleepNightScreen() {
   drawAuroraBackground();
+  char clk[16];
+  if (clockText(clk, sizeof(clk), true)) { // bedside clock above the card
+    tft.setTextDatum(MC_DATUM); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_DIM);
+    tft.drawString(clk, 240, 32);
+    tft.setTextDatum(TL_DATUM);
+  }
   Rect c = {60, 60, 360, 130};
   drawChamfer(c, MADD_PANEL, MADD_EDGE, 12);
   tft.setTextDatum(MC_DATUM);
@@ -3766,7 +4003,7 @@ void drawSleepNightScreen() {
 }
 
 void sleepLightScreen() {
-  digitalWrite(TFT_BL, HIGH);
+  setBacklight(255);
   sleepLit = true; sleepLitAt = millis();
   drawSleepNightScreen();
 }
@@ -3794,7 +4031,7 @@ void stopSleepNight(bool stayDark) {
   screen = SCR_CATEGORY;
   fullRedrawRequested = true;
   sleepDarkAfter = stayDark;
-  if (!stayDark) digitalWrite(TFT_BL, HIGH);
+  if (!stayDark) setBacklight(255);
   Serial.println("[SLEEP] stopped");
 }
 
@@ -3936,7 +4173,7 @@ bool serviceSleepNight(bool touched, int tx, int ty) {
   if (sleepDarkAfter && !sleepNightOn) {
     if (!press) return true;
     sleepDarkAfter = false;
-    digitalWrite(TFT_BL, HIGH);
+    setBacklight(255);
     fullRedrawRequested = true;
     uint16_t x, y;
     while (tft.getTouch(&x, &y)) delay(20); // the wake tap only lights the screen
@@ -3962,7 +4199,7 @@ bool serviceSleepNight(bool touched, int tx, int ty) {
   }
   if (sleepLit && sleepNightOn && millis() - sleepLitAt > 15000UL) {
     sleepLit = false;
-    digitalWrite(TFT_BL, LOW);
+    setBacklight(0);
   }
   return true;
 }
@@ -4013,9 +4250,16 @@ void setup() {
   audio_setVolume((uint8_t)volumePercent);
   audio_setHeadphonesMode(btHeadphonesMode);
   audio_setBtDeviceName(btDeviceName);
-  if (!updatePending) applyAudioOutput();
+  wifitime_loadTz();
 
-  playStartupAnimation(); // Bluetooth keeps connecting in the background meanwhile
+  playStartupAnimation();
+  // Clock: a quick WiFi time check BEFORE Bluetooth starts (WiFi and
+  // Bluetooth share one radio and the memory). Takes ~2-4 s when WiFi is
+  // set up; skipped entirely when it isn't. Then Bluetooth connects.
+  if (!updatePending) {
+    wifitime_begin();
+    applyAudioOutput();
+  }
   wifitime_onConnecting(showWifiConnecting);
 
   // SD card: splash + soundscape list. Missing card = plain screens, no sounds.
@@ -4076,10 +4320,7 @@ void setup() {
   loadPeople();
   loadFavorites();
   loadSessionLog();
-  // Clock sync over WiFi - skipped when Bluetooth is the output, because WiFi
-  // on the shared radio slows the Bluetooth connection (the clock still gets
-  // set during update checks).
-  if (!audioUsingBluetooth()) wifitime_begin();
+  loadResumePoint();
 
   if (updatePending) {
     runPendingUpdateCheck(); // before Bluetooth starts, so the download has the memory it needs
@@ -4093,6 +4334,25 @@ void loop() {
   uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
   serviceBootButton();
+
+  // Idle dimming: 5 min without a touch -> the screen dims (it never turns
+  // off). The tap that brightens it is not treated as a button press.
+  static unsigned long lastTouchAt = 0;
+  static bool dimmed = false;
+  bool sleepOwnsScreen = sleepNightOn || sleepDarkAfter || sleepSetupOn; // Sleep Night runs its own backlight
+  if (touched) lastTouchAt = millis();
+  if (dimmed && (touched || sleepOwnsScreen)) {
+    dimmed = false;
+    if (!sleepOwnsScreen) {
+      setBacklight(255);
+      while (tft.getTouch(&tx, &ty)) delay(20);
+      return;
+    }
+  } else if (!dimmed && !sleepOwnsScreen && millis() - lastTouchAt > 5UL * 60000UL) {
+    setBacklight(40);
+    dimmed = true;
+  }
+
   serviceSleepSerial();
   if (serviceSleepNight(touched, tx, ty)) { delay(20); return; }
 
@@ -4140,6 +4400,14 @@ void loop() {
   }
 
   updateProgram();
+
+  // Resume point for a power loss: minutes left, saved once a minute
+  static unsigned long lastResumeSave = 0;
+  if (sessionTimerArmed && waveform_isRunning() && !programActive && selectedIndex >= 0 && millis() - lastResumeSave > 60000UL) {
+    lastResumeSave = millis();
+    int left = timerMinutes - (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
+    if (left > 0) saveResumePoint(left);
+  }
 
   // Auto-stop when the session timer elapses
   bool runNeedsRefresh = false;
@@ -4229,8 +4497,8 @@ void loop() {
     refreshRunControls();
   }
 
-  if (screen == SCR_RUN) updateRunPulse();
-  if (screen == SCR_CATEGORY) { static unsigned long lastTopTick = 0; if (millis() - lastTopTick > 1000) { drawTopStatus(false); lastTopTick = millis(); } }
+  if (screen == SCR_RUN) { updateRunPulse(); updateBreathPacer(); }
+  if (screen == SCR_CATEGORY) { static unsigned long lastTopTick = 0; if (millis() - lastTopTick > 1000) { drawTopStatus(false); drawHomeClock(); lastTopTick = millis(); } }
   // Once-a-second small updates on the Run screen (countdown, live
   // frequency, BT status) - each only repaints if its text changed.
   if (screen == SCR_RUN) {
