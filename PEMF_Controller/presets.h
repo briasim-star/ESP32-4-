@@ -10,7 +10,13 @@
 // electronic devices, pregnancy) before using this device on a person.
 // ============================================================================
 
-enum WaveShape : uint8_t { WAVE_SQUARE = 0, WAVE_SINE = 1 };
+// Pulse shapes. SQUARE = the classic bipolar pulse. SAW = power ramps up
+// then drops sharply, polarity flipping each pulse (a shape offered by
+// several established devices; adds even harmonics). LAYERED = each slow
+// pulse is a short burst of fast 500 Hz polarity flips (like the
+// "background frequency" programs some mats offer). All are exploration
+// settings - no health benefit is claimed for any shape.
+enum WaveShape : uint8_t { WAVE_SQUARE = 0, WAVE_SINE = 1, WAVE_SAW = 2, WAVE_LAYERED = 3 };
 
 // The MD10C is only rated for PWM/switching up to 20 kHz - hard-cap all
 // generated output at that ceiling.
@@ -90,6 +96,17 @@ static const Preset BASE_PRESETS[] = {
 
   // --- Cultural/wellness frequency association (see note below) ---
   {"963 Hz - God Frequency",   963.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
+
+  // --- Added 1.9.2 (always APPEND here: favorites are saved by position) ---
+  // Frequencies common across established consumer devices (research
+  // review, Sept 2026). Exploration settings only - no benefit claimed.
+  {"Classic Rhythm",            9.6f, WAVE_SQUARE,  CAT_CHRONIC_SYSTEMIC}, // long-standing main frequency on one consumer device
+  {"Steady Flow",              16.0f, WAVE_SQUARE,  CAT_CHRONIC_SYSTEMIC}, // used in several published low-intensity field studies
+  {"Bright Tone",              25.0f, WAVE_SQUARE,  CAT_CHRONIC_SYSTEMIC}, // mid-range setting common across 1-30 Hz mats
+  {"Sawtooth Wave",            10.0f, WAVE_SAW,     CAT_CHRONIC_SYSTEMIC}, // alternative pulse shape offered by several devices
+  {"Deep Calm",                 1.0f, WAVE_SQUARE,  CAT_HEART_CIRC},       // used in overnight programs on some devices
+  {"Stillness",                 0.5f, WAVE_SQUARE,  CAT_HEART_CIRC},       // lowest setting on several mats
+  {"Layered Calm",              2.0f, WAVE_LAYERED, CAT_HEART_CIRC},       // slow pulse carrying a 500 Hz "background" layer
 };
 static const int NUM_BASE_PRESETS = sizeof(BASE_PRESETS) / sizeof(BASE_PRESETS[0]);
 // This list was rewritten to use general-wellness language only, with
@@ -151,8 +168,8 @@ struct Program {
 // symbol name below (BONE_HEALING_PROGRAM) is unchanged since it's
 // referenced elsewhere in the firmware and isn't user-facing.
 static const Program BONE_HEALING_PROGRAM = {
-  "Frequency Sweep Program",
-  "A studied multi-frequency package (220/727/880/10,000 Hz) from bone-fracture-healing research",
+  "High Frequency Sweep",
+  "Moves through 220, 727, 880 and 10,000 Hz and back. An exploration setting - no benefit is claimed.",
   {
     {220.0f,   WAVE_SQUARE, STEP_HOLD, 60},
     {727.0f,   WAVE_SQUARE, STEP_RAMP, 60},
@@ -182,9 +199,46 @@ static const Program BONE_HEALING_PROGRAM = {
 // the literature, so these are labeled as "structured the same way a
 // real study protocol was designed," not "proven effective."
 // ---------------------------------------------------------------------
-static const int NUM_SEQUENCES = 18;
+static const int NUM_SEQUENCES = 25;
 static const Program SEQUENCES[NUM_SEQUENCES] = {
-  BONE_HEALING_PROGRAM, // real cited rat study - see its own definition above
+  BONE_HEALING_PROGRAM, // (symbol name only - shown as "High Frequency Sweep", no healing claim)
+
+  // --- Added 1.9.2: glides, cycles, sweeps and a harmonic ladder, modeled on
+  // programs offered by established consumer devices. Exploration settings. ---
+  { "Evening Wind-Down",
+    "Glides from 9.6 Hz down to 1 Hz over 45 minutes, like the stepped-down evening programs on some established mats. An exploration setting.",
+    { {9.6f, WAVE_SQUARE, STEP_HOLD, 120}, {1.0f, WAVE_SQUARE, STEP_RAMP, 2580} }, 2 },
+
+  { "Gentle Cycle",
+    "Drifts slowly between 3 Hz and 1 Hz, a pattern found in evening programs on some devices. An exploration setting.",
+    { {3.0f, WAVE_SQUARE, STEP_HOLD, 180}, {1.0f, WAVE_SQUARE, STEP_RAMP, 180}, {3.0f, WAVE_SQUARE, STEP_RAMP, 180},
+      {1.0f, WAVE_SQUARE, STEP_RAMP, 180}, {3.0f, WAVE_SQUARE, STEP_RAMP, 180}, {1.0f, WAVE_SQUARE, STEP_RAMP, 180} }, 6 },
+
+  { "Harmonic Ladder",
+    "Climbs the harmonic series in octaves - 1.25, 2.5, 5, 10, 20 Hz - then settles back down. Each step doubles the one before. An exploration setting.",
+    { {1.25f, WAVE_SQUARE, STEP_HOLD, 180}, {2.5f, WAVE_SQUARE, STEP_HOLD, 180}, {5.0f, WAVE_SQUARE, STEP_HOLD, 180},
+      {10.0f, WAVE_SQUARE, STEP_HOLD, 180}, {20.0f, WAVE_SQUARE, STEP_HOLD, 180}, {10.0f, WAVE_SQUARE, STEP_HOLD, 120},
+      {5.0f, WAVE_SQUARE, STEP_HOLD, 120}, {2.5f, WAVE_SQUARE, STEP_HOLD, 120} }, 8 },
+
+  { "8-11 Hz Band Glide",
+    "Glides back and forth through 8-11 Hz, a band used by a leading mat brand. An exploration setting.",
+    { {8.0f, WAVE_SQUARE, STEP_HOLD, 60}, {11.0f, WAVE_SQUARE, STEP_RAMP, 240}, {8.0f, WAVE_SQUARE, STEP_RAMP, 240},
+      {11.0f, WAVE_SQUARE, STEP_RAMP, 240}, {8.0f, WAVE_SQUARE, STEP_RAMP, 240} }, 5 },
+
+  { "28-31 Hz Band Glide",
+    "Glides back and forth through 28-31 Hz, a second band used by the same brand. An exploration setting.",
+    { {28.0f, WAVE_SQUARE, STEP_HOLD, 60}, {31.0f, WAVE_SQUARE, STEP_RAMP, 240}, {28.0f, WAVE_SQUARE, STEP_RAMP, 240},
+      {31.0f, WAVE_SQUARE, STEP_RAMP, 240}, {28.0f, WAVE_SQUARE, STEP_RAMP, 240} }, 5 },
+
+  { "Full Sweep 1-30 Hz",
+    "A slow sweep up and back across the range most consumer mats use. An exploration setting.",
+    { {1.0f, WAVE_SQUARE, STEP_HOLD, 60}, {30.0f, WAVE_SQUARE, STEP_RAMP, 900}, {1.0f, WAVE_SQUARE, STEP_RAMP, 900} }, 3 },
+
+  { "Varied Steps 1-30 Hz",
+    "Moves between different frequencies across 1-30 Hz every two minutes, like the varied programs on some mats. A fixed pattern, not random. An exploration setting.",
+    { {7.0f, WAVE_SQUARE, STEP_HOLD, 120}, {22.0f, WAVE_SQUARE, STEP_HOLD, 120}, {3.0f, WAVE_SQUARE, STEP_HOLD, 120},
+      {15.0f, WAVE_SQUARE, STEP_HOLD, 120}, {28.0f, WAVE_SQUARE, STEP_HOLD, 120}, {5.0f, WAVE_SQUARE, STEP_HOLD, 120},
+      {12.0f, WAVE_SQUARE, STEP_HOLD, 120}, {1.0f, WAVE_SQUARE, STEP_HOLD, 120} }, 8 },
 
   { "Sleep Descent",
     "Structured like a published sleep-entrainment study design: follows the real alpha->theta->delta brainwave-band progression the body moves through when falling asleep. Band science is established; entrainment efficacy is still debated in the literature.",

@@ -47,6 +47,47 @@ static volatile float currentFreq = 0;
 static volatile WaveShape currentShape = WAVE_SQUARE;
 static volatile float intensityFrac = 1.0f; // 0.0 - 1.0, scales output magnitude
 
+// ---- Sawtooth and Layered shapes -------------------------------------
+// Driven from a small task (1 ms steps) that only calls ledcWrite - no
+// interrupt-time LEDC calls. SAW: the magnitude duty ramps 0 -> set power
+// over each period, then drops; DIR flips polarity every pulse. LAYERED:
+// DIR runs as a hardware 500 Hz square (the fast "background" flips) and
+// the magnitude is switched on for a burst at the start of each slow
+// period, off for the rest. Power always scales with intensityFrac, so the
+// normal power setting and the 40% ceiling apply unchanged.
+static const float LAYER_CARRIER_HZ = 500.0f;
+static const float SAW_MAX_HZ = 50.0f;      // above this the 1 ms steps get too coarse - square is used instead
+static TaskHandle_t shapeTask = nullptr;
+static volatile bool shapeActive = false;   // the task only drives the coil while this is true
+
+static void shapeTaskFn(void*) {
+  TickType_t lastWake = xTaskGetTickCount();
+  float phase = 0;
+  bool polarity = false;
+  for (;;) {
+    vTaskDelayUntil(&lastWake, 1); // 1 ms
+    if (!shapeActive || !running) { phase = 0; continue; }
+    float f = currentFreq;
+    if (f <= 0) continue;
+    phase += f / 1000.0f;
+    bool wrapped = false;
+    if (phase >= 1.0f) { phase -= (float)(int)phase; wrapped = true; }
+    uint8_t full = (uint8_t)(255.0f * intensityFrac);
+    if (currentShape == WAVE_SAW) {
+      if (wrapped) { polarity = !polarity; digitalWrite(PIN_MD10C_DIR, polarity ? HIGH : LOW); }
+      ledcWrite(PWM_CHANNEL_MAG, (uint8_t)(full * phase));
+    } else { // WAVE_LAYERED: burst = first 25% of each period, at most 60 ms
+      float burstFrac = 0.060f * f;
+      if (burstFrac > 0.25f) burstFrac = 0.25f;
+      ledcWrite(PWM_CHANNEL_MAG, phase < burstFrac ? full : 0);
+    }
+  }
+}
+
+static void startShapeTask() {
+  if (!shapeTask) xTaskCreatePinnedToCore(shapeTaskFn, "pulse", 2048, NULL, 2, &shapeTask, 1);
+}
+
 static void buildSinTable(int len) {
   if (len > SIN_TABLE_MAX) len = SIN_TABLE_MAX;
   sinTableLen = len;
@@ -93,6 +134,8 @@ void waveform_begin() {
 
 void waveform_stop() {
   running = false;
+  shapeActive = false;
+  delay(2); // let the pulse task finish its current step before the pins are reset
   stopSineTimer();
 
   // Make sure DIR is released from LEDC (used in square mode) before we
@@ -110,12 +153,25 @@ void waveform_start(float freqHz, WaveShape shape, uint8_t intensityPercent) {
   if (freqHz <= 0 || freqHz > MAX_OUTPUT_FREQ_HZ) return;
   if (intensityPercent > 100) intensityPercent = 100;
 
+  if (shape == WAVE_SAW && freqHz > SAW_MAX_HZ) shape = WAVE_SQUARE;
   currentFreq = freqHz;
   currentShape = shape;
   intensityFrac = intensityPercent / 100.0f;
   running = true;
 
-  if (shape == WAVE_SQUARE) {
+  if (shape == WAVE_SAW || shape == WAVE_LAYERED) {
+    startShapeTask();
+    ledcWrite(PWM_CHANNEL_MAG, 0);
+    if (shape == WAVE_LAYERED) { // fast polarity flips from the hardware; the task gates the power
+      int bits = calcLedcBits(LAYER_CARRIER_HZ);
+      ledcSetup(PWM_CHANNEL_SQUARE, (uint32_t)LAYER_CARRIER_HZ, bits);
+      ledcAttachPin(PIN_MD10C_DIR, PWM_CHANNEL_SQUARE);
+      ledcWrite(PWM_CHANNEL_SQUARE, 1 << (bits - 1));
+    } else {
+      pinMode(PIN_MD10C_DIR, OUTPUT);
+    }
+    shapeActive = true;
+  } else if (shape == WAVE_SQUARE) {
     // PWM pin's duty sets the overall magnitude (scaled by intensity);
     // DIR is hardware-toggled at the target frequency with 50% duty,
     // giving a clean bipolar square wave whose amplitude is set by PWM.
@@ -166,9 +222,12 @@ void waveform_setIntensity(uint8_t intensityPercent) {
 void waveform_setFrequency(float newFreqHz) {
   if (!running) return;
   if (newFreqHz <= 0 || newFreqHz > MAX_OUTPUT_FREQ_HZ) return;
+  if (currentShape == WAVE_SAW && newFreqHz > SAW_MAX_HZ) newFreqHz = SAW_MAX_HZ;
   currentFreq = newFreqHz;
 
-  if (currentShape == WAVE_SQUARE) {
+  if (currentShape == WAVE_SAW || currentShape == WAVE_LAYERED) {
+    return; // the pulse task reads currentFreq every step
+  } else if (currentShape == WAVE_SQUARE) {
     int sqBits = calcLedcBits(newFreqHz);
     ledcSetup(PWM_CHANNEL_SQUARE, (uint32_t)newFreqHz, sqBits);
     ledcWrite(PWM_CHANNEL_SQUARE, 1 << (sqBits - 1)); // keep the duty at 50% for whatever resolution this frequency now needs

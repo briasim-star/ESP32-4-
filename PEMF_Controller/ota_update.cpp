@@ -4,7 +4,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <esp_task_wdt.h>
-#include "esp32_cert_bundle.h" // provides x509_crt_bundle / x509_crt_bundle_len - see build_and_publish.yml for how this library gets installed
+#include "root_certs.h" // the few root certificates GitHub Pages needs (replaced the 56 KB full bundle in 1.9.2)
 
 static const char* VERSION_CHECK_URL = "https://briasim-star.github.io/ESP32-4-/firmware/version.txt";
 static const char* FIRMWARE_BIN_URL  = "https://briasim-star.github.io/ESP32-4-/firmware/firmware.bin";
@@ -41,7 +41,7 @@ static bool checkForUpdateImpl() {
   }
 
   WiFiClientSecure client;
-  client.setCACertBundle(x509_crt_bundle); // this library's version takes just the bundle pointer, not a separate length - confirmed by the real compiler error, not guessed
+  client.setCACert(UPDATE_ROOT_CAS); // several PEM roots in one string - any of them can validate the server
 
   HTTPClient http;
   // Two explicit, bounded timeouts, on top of the manual stall-detection
@@ -77,7 +77,7 @@ static bool downloadAndInstallImpl() {
   }
 
   WiFiClientSecure client;
-  client.setCACertBundle(x509_crt_bundle); // this library's version takes just the bundle pointer, not a separate length - confirmed by the real compiler error, not guessed
+  client.setCACert(UPDATE_ROOT_CAS); // several PEM roots in one string - any of them can validate the server
 
   HTTPClient http;
   http.setConnectTimeout(OTA_HTTP_TIMEOUT_MS);

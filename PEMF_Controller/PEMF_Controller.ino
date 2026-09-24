@@ -29,7 +29,6 @@
 // available globally by TFT_eSPI.h itself when LOAD_GFXFF is set in
 // TFT_eSPI_User_Setup.h (it auto-includes every GFXFF font internally) -
 // including them again here causes "redefinition" errors, so don't.
-#include <qrcode.h>
 #include "pins.h"
 #include "presets.h"
 #include "waveform.h"
@@ -37,8 +36,6 @@
 #include "wifi_time.h"
 #include "sd_media.h"
 #include "ota_update.h"
-#include "subscription_check.h"
-#include "local_audio.h"
 #include <esp_task_wdt.h>
 #include "ui_types.h"
 #include <nvs_flash.h>
@@ -54,8 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
-static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
+const char* FIRMWARE_VERSION = "1.9.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -65,7 +61,7 @@ TFT_eSPI tft = TFT_eSPI();
 // ---------------------------------------------------------------------
 const GFXfont* FONT_SM = &FreeSansBold9pt7b;   // body text, fast/list buttons
 const GFXfont* FONT_LG = &FreeSansBold12pt7b;  // primary buttons
-const GFXfont* FONT_XL = &FreeSansBold18pt7b;  // screen titles, headline values
+const GFXfont* FONT_XL = &FreeSansBold12pt7b;  // was the 18 pt font - same as FONT_LG now, frees ~8 KB of flash
 
 // ---------------------------------------------------------------------
 // Theme: dark, high-contrast, single accent color per meaning -
@@ -2324,36 +2320,8 @@ void handleCustomFreqTouch(int x, int y) {
 }
 
 // ---------------------------------------------------------------------
-// Screen: Check for Updates - shows a QR code + the install page URL.
-// This device has no browser/WiFi of its own; the person scans this with
-// their phone (or types the URL) to reach the install page, where they
-// can also grab a previous firmware version if a new one causes problems.
-//
-// Uses the ESP32 core's own built-in esp_qrcode_* API (no external
-// library needed). Its display callback takes only the QR handle - no
-// user-data pointer - so drawing parameters are plain constants inside
-// the callback rather than passed through a context struct.
+// Screen: Check for Updates (over WiFi).
 // ---------------------------------------------------------------------
-// QR block sits on the right side of the screen now that there's width to
-// spare; text/instructions live in the left column.
-void drawUpdateQrCode(esp_qrcode_handle_t qrcode) {
-  int scale = 4;
-  int size = esp_qrcode_get_size(qrcode);
-  int qrPixels = size * scale;
-  int qx = 300;
-  int qy = 60; // shifted down from 20 - real bug found: at 20 it overlapped the enlarged Home button (ends y=44)
-
-  // White quiet-zone margin around the code - required for reliable scanning.
-  tft.fillRect(qx - 10, qy - 10, qrPixels + 20, qrPixels + 20, TFT_WHITE);
-  for (int y = 0; y < size; y++) {
-    for (int x = 0; x < size; x++) {
-      if (esp_qrcode_get_module(qrcode, x, y)) {
-        tft.fillRect(qx + x * scale, qy + y * scale, scale, scale, TFT_BLACK);
-      }
-    }
-  }
-}
-
 Rect btnOtaAction = {20, 180, 220, 44};
 bool otaChecked = false;
 bool otaUpdateAvailable = false;
@@ -2372,21 +2340,8 @@ void drawUpdateScreen() {
   char verBuf[32];
   snprintf(verBuf, sizeof(verBuf), "Current version: %s", FIRMWARE_VERSION);
   tft.drawString(verBuf, 20, 44);
-  tft.drawString("Update over WiFi, or scan with", 20, 66);
-  tft.drawString("your phone to install by cable:", 20, 86);
-
-  esp_qrcode_config_t qrCfg = ESP_QRCODE_CONFIG_DEFAULT();
-  qrCfg.display_func = drawUpdateQrCode;
-  qrCfg.max_qrcode_version = 5;
-  qrCfg.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
-  esp_qrcode_generate(&qrCfg, UPDATE_URL);
-
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  // Manually wrapped - the URL is too long for one line at this font size.
-  tft.drawString("briasim-star.github.io/", 20, 106);
-  tft.drawString("ESP32-4-/install.html", 20, 128);
+  tft.drawString("Updates download and install over WiFi.", 20, 66);
+  tft.drawString("Keep the device plugged in while it installs.", 20, 88);
 
   if (!otaChecked) {
     drawButton(btnOtaAction, "Check for Updates", COLOR_GOOD);
@@ -2534,10 +2489,6 @@ void buildFavoritesIndex() {
   }
 }
 
-Rect titleTapZone = {50, 0, 230, 36}; // tap the title 5 times for the hidden stats panel
-int titleTapCount = 0;
-unsigned long titleTapWindowStart = 0;
-bool showDeviceStats = false;
 
 // ---------------------------------------------------------------------
 // Home screen: quick start, favorites, and nine color-coded tiles.
@@ -2655,26 +2606,6 @@ void drawCategoryScreen() {
     drawChamferButton(btnResumeNo, "No thanks", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
   }
 
-  if (showDeviceStats) {
-    Rect p = {60, 70, 360, 180};
-    drawChamfer(p, MADD_PANEL, MADD_MAGENTA, 14);
-    tft.setFreeFont(FONT_LG);
-    tft.setTextColor(MADD_TEXT);
-    tft.setTextDatum(TC_DATUM);
-    tft.drawString("You found it!", 240, p.y + 16);
-    tft.setFreeFont(FONT_SM);
-    tft.setTextColor(MADD_DIM);
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%lu sessions run, all-time", lifetimeSessionCount);
-    tft.drawString(buf, 240, p.y + 56);
-    snprintf(buf, sizeof(buf), "%lu h %lu min of session time", lifetimeMinutes / 60, lifetimeMinutes % 60);
-    tft.drawString(buf, 240, p.y + 78);
-    snprintf(buf, sizeof(buf), "Up %luh %lum since power-on", millis() / 3600000UL, (millis() / 60000UL) % 60);
-    tft.drawString(buf, 240, p.y + 100);
-    tft.setTextColor(MADD_CYAN);
-    tft.drawString("Tap anywhere to close", 240, p.y + 140);
-    tft.setTextDatum(TL_DATUM);
-  }
 }
 
 void handleCategoryTouch(int x, int y) {
@@ -2689,20 +2620,6 @@ void handleCategoryTouch(int x, int y) {
       resumeOffer = false;
       clearResumePoint();
       fullRedrawRequested = true;
-    }
-    return;
-  }
-  if (showDeviceStats) {
-    showDeviceStats = false; // tap anywhere to dismiss
-    return;
-  }
-  if (touchInRect(x, y, titleTapZone)) {
-    unsigned long now = millis();
-    if (now - titleTapWindowStart > 4000) { titleTapCount = 0; titleTapWindowStart = now; }
-    titleTapCount++;
-    if (titleTapCount >= 5) {
-      titleTapCount = 0;
-      showDeviceStats = true;
     }
     return;
   }
@@ -2950,8 +2867,12 @@ uint16_t categoryColor(Category c) {
 // Sleep Night card: fills the empty third row of the Sleep list.
 Rect btnSleepNight = {18, 160, 444, 48};
 void openSleepSetup(); // defined with Sleep Night, further down
+// Shown on the last page of the Sleep list, in the free third row.
 bool showSleepNightCard(int total) {
-  return !viewingFavorites && currentCategory == CAT_HEART_CIRC && listPage == 0 && total <= 4;
+  if (viewingFavorites || currentCategory != CAT_HEART_CIRC) return false;
+  int lastPage = total > 0 ? (total - 1) / ITEMS_PER_PAGE : 0;
+  int onPage = total - listPage * ITEMS_PER_PAGE;
+  return listPage == lastPage && onPage <= 4;
 }
 
 // 2 x 3 grid of presets on the MADD background, each with its category color.
@@ -3470,6 +3391,8 @@ void drawCountdownOnly() {
   char freqBuf[32], f[16];
   formatFreq(liveFrequency(), f, sizeof(f));
   if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%s  %d/%d", f, programStepIndex + 1, currentProgram.stepCount);
+  else if (selWave == WAVE_SAW) snprintf(freqBuf, sizeof(freqBuf), "Sawtooth %s", f);
+  else if (selWave == WAVE_LAYERED) snprintf(freqBuf, sizeof(freqBuf), "Layered %s", f);
   else snprintf(freqBuf, sizeof(freqBuf), "%s", f);
 
   if (strcmp(timeBuf, lastCountdownText) != 0 || strcmp(freqBuf, lastFreqText) != 0) {
@@ -3909,7 +3832,6 @@ int lastDrawnPage = -1;
 int lastDrawnSequencesPage = -1;
 int lastDrawnSoundscapesPage = -1;
 int lastDrawnSettingsPage = -1;
-bool lastDrawnShowDeviceStats = false;
 
 // Shown the moment the person submits their WiFi password on their phone,
 // so the few seconds of connecting never look like a frozen screen.
@@ -3960,7 +3882,7 @@ void playStartupAnimation() {
 // warms, and fades to silence over the last 15 min. No chime. The screen
 // goes dark after 15 s; a tap lights it (Stop button). Progress is saved
 // every minute, so a restart or power blip resumes where it left off.
-// Started over USB serial: "SLEEP <minutes> [sound name]", "STOP", "LIST".
+// Started from Home -> Sleep -> Sleep Night.
 // ---------------------------------------------------------------------
 bool sleepNightOn = false;
 bool sleepDarkAfter = false;           // finished: stay dark until a tap
@@ -4062,30 +3984,6 @@ void updateSleepShape() {
     g *= 1.0f - depth * (0.5f - 0.5f * cosf(6.2831853f * phase));
   }
   audio_setNightShape(g, warm);
-}
-
-void serviceSleepSerial() {
-  static char line[48]; static int len = 0;
-  while (Serial.available()) {
-    char ch = (char)Serial.read();
-    if (ch == '\r') continue;
-    if (ch != '\n') { if (len < (int)sizeof(line) - 1) line[len++] = ch; continue; }
-    line[len] = 0; len = 0;
-    if (strncmp(line, "LIST", 4) == 0) {
-      for (int i = 0; i < sdmedia_soundscapeCount(); i++) Serial.printf("[SLEEP] %d: %s\n", i, sdmedia_soundscapeName(i));
-    } else if (strncmp(line, "STOP", 4) == 0) {
-      if (sleepNightOn) stopSleepNight(false);
-    } else if (strncmp(line, "SLEEP", 5) == 0) {
-      char* rest = line + 5;
-      long mins = strtol(rest, &rest, 10);
-      if (mins <= 0 || mins > 720) mins = 300;
-      while (*rest == ' ') rest++;
-      int idx = -1;
-      if (*rest) for (int i = 0; i < sdmedia_soundscapeCount(); i++) if (nameHas(sdmedia_soundscapeName(i), rest)) { idx = i; break; }
-      if (idx < 0) idx = defaultSoundscapeFor("sleep", 1.0f);
-      startSleepNight((unsigned long)mins, idx);
-    }
-  }
 }
 
 // ---- Sleep Night setup: pick the sound (it plays as you choose) and length ----
@@ -4353,7 +4251,6 @@ void loop() {
     dimmed = true;
   }
 
-  serviceSleepSerial();
   if (serviceSleepNight(touched, tx, ty)) { delay(20); return; }
 
   // A "touch" held for 4+ seconds is almost always something pressing the
@@ -4480,7 +4377,6 @@ void loop() {
                  (screen == SCR_LIST && listPage != lastDrawnPage) ||
                  (screen == SCR_SEQUENCES && sequencesPage != lastDrawnSequencesPage) ||
                  (screen == SCR_SOUNDSCAPES && soundscapesPage != lastDrawnSoundscapesPage) ||
-                 (screen == SCR_CATEGORY && showDeviceStats != lastDrawnShowDeviceStats) ||
                  (screen == SCR_SETTINGS && settingsPage != lastDrawnSettingsPage);
   if (changed) {
     drawScreen(screen);
@@ -4488,7 +4384,6 @@ void loop() {
     lastDrawnPage = listPage;
     lastDrawnSequencesPage = sequencesPage;
     lastDrawnSoundscapesPage = soundscapesPage;
-    lastDrawnShowDeviceStats = showDeviceStats;
     lastDrawnSettingsPage = settingsPage;
     fullRedrawRequested = false;
   } else if (needsRefresh) {
