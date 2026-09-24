@@ -42,6 +42,7 @@ static volatile float g_toneHz = 10.0f;
 static volatile float g_volume = 0.6f;
 static volatile uint8_t g_volumePercent = 55; // what the person set, 0-100
 static volatile bool btVolumeDirty = true;       // speaker volume needs re-sending
+static uint8_t btSpeakerVolumeFor(uint8_t percent); // defined with audio_setVolume()
 static volatile bool g_headphones = false;
 
 static unsigned long g_underruns = 0;
