@@ -283,7 +283,7 @@ static void refillRing() {
 // ---- Built-in noise (paths "noise:white" / "noise:pink" / "noise:brown") ----
 // Generated live, one independent generator per ear so it sounds wide in
 // headphones. No file = no repeat point, ever.
-static volatile int8_t g_noiseColor = -1; // -1 = a WAV file is the soundscape; 0 white, 1 pink, 2 brown
+static volatile int8_t g_noiseColor = -1; // -1 = a WAV file is the soundscape; 0 white, 1 pink, 2 brown, 3 Solfeggio tone
 struct NoiseState { uint32_t seed; float b0, b1, b2, brown; };
 static NoiseState noiseL = {0x12345678u, 0, 0, 0, 0}, noiseR = {0x9E3779B9u, 0, 0, 0, 0};
 
@@ -301,7 +301,23 @@ static inline float noiseSample(NoiseState& s, int color) {
   return s.brown * 3.2f;
 }
 
+// Fixed pure tone for the Solfeggio entries ("tone:963" etc.) - g_noiseColor 3.
+// Kept at a modest level: a pure sine sounds much louder than noise.
+static volatile float g_fixedToneHz = 0;
+static float fixedPhase = 0;
+
+static void renderFixedTone(StereoFrame* out, int n) {
+  const float amp = 32767.0f * 0.35f;
+  float hz = g_fixedToneHz;
+  for (int i = 0; i < n; i++) {
+    int16_t v = (int16_t)(fastSin(fixedPhase) * amp);
+    advancePhase(fixedPhase, hz);
+    out[i].l = out[i].r = v;
+  }
+}
+
 static void renderNoise(StereoFrame* out, int n) {
+  if (g_noiseColor == 3) { renderFixedTone(out, n); return; }
   int c = g_noiseColor;
   for (int i = 0; i < n; i++) {
     float l = fmaxf(-1.0f, fminf(1.0f, noiseSample(noiseL, c)));
@@ -324,6 +340,13 @@ static void serviceSoundscapeFile() {
       sndDataSize = 0;
       g_noiseColor = !strcmp(path + 6, "white") ? 0 : !strcmp(path + 6, "pink") ? 1 : 2;
       Serial.printf("[SCAPE] built-in %s noise\n", path + 6);
+    } else if (strncmp(path, "tone:", 5) == 0) { // Solfeggio pure tone
+      if (sndFile) { sdmedia_lock(); sndFile.close(); sdmedia_unlock(); }
+      sndDataSize = 0;
+      g_fixedToneHz = (float)atoi(path + 5);
+      fixedPhase = 0;
+      g_noiseColor = 3;
+      Serial.printf("[SCAPE] Solfeggio tone %s Hz\n", path + 5);
     } else {
       g_noiseColor = -1;
       sdmedia_lock();

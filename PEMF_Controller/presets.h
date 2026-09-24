@@ -67,35 +67,35 @@ static const Preset BASE_PRESETS[] = {
   {"Head & Tension Ease",       4.0f, WAVE_SQUARE, CAT_BONE_JOINT},
 
   // --- Athletic & Movement: general fitness/recovery framing ---
-  {"Muscle Comfort",           50.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
-  {"Athletic Recovery",       100.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
-  {"Athletic Performance",     50.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
+  {"Muscle Comfort",           20.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
+  {"Athletic Recovery",        22.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
+  {"Athletic Performance",     28.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
   {"Post-Activity Ease",       12.0f, WAVE_SQUARE, CAT_PAIN_RECOVERY},
 
   // --- General Wellness: everyday vitality/energy framing ---
   {"General Vitality",         24.0f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
-  {"Energy Balance",           18.0f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
-  {"Everyday Wellness",        10.0f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
+  {"Energy Balance",           19.0f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
+  {"Everyday Wellness",         9.0f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
   {"Grounding (Schumann)",      7.83f, WAVE_SQUARE, CAT_CHRONIC_SYSTEMIC},
 
   // --- Relaxation & Sleep ---
   {"Deep Relaxation",           2.0f, WAVE_SQUARE, CAT_HEART_CIRC},
-  {"Meditation",                2.0f, WAVE_SQUARE, CAT_HEART_CIRC},
-  {"Better Rest",               2.0f, WAVE_SQUARE, CAT_HEART_CIRC},
+  {"Meditation",                6.0f, WAVE_SQUARE, CAT_HEART_CIRC},
+  {"Better Rest",               1.5f, WAVE_SQUARE, CAT_HEART_CIRC},
   {"Stress Ease",               3.0f, WAVE_SQUARE, CAT_HEART_CIRC},
 
   // --- Focus & Balance ---
-  {"Mental Clarity",          100.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
-  {"Focus",                   100.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
+  {"Mental Clarity",           18.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
+  {"Focus",                    14.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
   {"Emotional Balance",        33.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
-  {"Chakra Alignment",         33.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
+  {"Inner Balance",            11.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
 
   // --- Skin Comfort ---
-  {"Skin Comfort",             10.0f, WAVE_SQUARE, CAT_SKIN_WOUND},
-  {"General Skin Wellness",    15.0f, WAVE_SQUARE, CAT_SKIN_WOUND},
+  {"Skin Comfort",              5.0f, WAVE_SQUARE, CAT_SKIN_WOUND},
+  {"General Skin Wellness",    17.0f, WAVE_SQUARE, CAT_SKIN_WOUND},
 
   // --- Cultural/wellness frequency association (see note below) ---
-  {"963 Hz - God Frequency",   963.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE},
+  {"Calm Focus",               13.0f, WAVE_SQUARE, CAT_MENTAL_COGNITIVE}, // was "963 Hz" - now a Solfeggio SOUND (see Sounds); slot kept so saved favorites stay in place
 
   // --- Added 1.9.2 (always APPEND here: favorites are saved by position) ---
   // Frequencies common across established consumer devices (research
@@ -122,10 +122,11 @@ static const int NUM_BASE_PRESETS = sizeof(BASE_PRESETS) / sizeof(BASE_PRESETS[0
 // "grounding" wellness association layered on top of that real number is
 // a popular one, not a clinical claim.
 //
-// "963 Hz - God Frequency" is a popular Solfeggio-tone/meditation cultural
-// association (numerology-based, not a clinical claim) - same honest
-// treatment as the Schumann entry above: real number, cultural
-// association labeled as association. No pineal gland or decalcification
+// 963 Hz ("God frequency") and the other Solfeggio numbers are AUDIO tones
+// from a sound/meditation tradition, not PEMF pulse rates - since 2.0.1
+// they live in the Sounds list (played as pure tones under any session),
+// each shown with its traditional association and "no health effect is
+// claimed". No pineal gland or decalcification
 // claim is made anywhere in this codebase: real published research on
 // frequency and the pineal gland (50-60Hz ELF-EMF exposure) points
 // toward melatonin *disruption*, not a benefit, so that framing was
@@ -158,28 +159,6 @@ struct Program {
   int stepCount;
 };
 
-// Studied multi-frequency package: 220/727/880/10000 Hz, from a real
-// (rat) study comparing this combination against a single 4Hz signal.
-// The study didn't specify whether these were delivered as discrete
-// steps or swept - built here as a gentle rise through each, then a ramp
-// back down to the start, rather than abrupt jumps. Named descriptively
-// rather than "Bone Healing" - the research citation belongs in the note
-// field, not as a product name implying a treatment outcome. The C++
-// symbol name below (BONE_HEALING_PROGRAM) is unchanged since it's
-// referenced elsewhere in the firmware and isn't user-facing.
-static const Program BONE_HEALING_PROGRAM = {
-  "High Frequency Sweep",
-  "Moves through 220, 727, 880 and 10,000 Hz and back. An exploration setting - no benefit is claimed.",
-  {
-    {220.0f,   WAVE_SQUARE, STEP_HOLD, 60},
-    {727.0f,   WAVE_SQUARE, STEP_RAMP, 60},
-    {880.0f,   WAVE_SQUARE, STEP_RAMP, 60},
-    {10000.0f, WAVE_SQUARE, STEP_RAMP, 60},
-    {220.0f,   WAVE_SQUARE, STEP_RAMP, 60}, // ramp back down to close the session gently
-  },
-  5
-};
-
 // ---------------------------------------------------------------------
 // Sequences - named, multi-stage Programs the person can browse and pick,
 // distinct from the auto-generated-harmonics idea this replaced (that
@@ -199,10 +178,8 @@ static const Program BONE_HEALING_PROGRAM = {
 // the literature, so these are labeled as "structured the same way a
 // real study protocol was designed," not "proven effective."
 // ---------------------------------------------------------------------
-static const int NUM_SEQUENCES = 25;
+static const int NUM_SEQUENCES = 24; // 1.9.x: "High Frequency Sweep" (Rife-tradition numbers) removed
 static const Program SEQUENCES[NUM_SEQUENCES] = {
-  BONE_HEALING_PROGRAM, // (symbol name only - shown as "High Frequency Sweep", no healing claim)
-
   // --- Added 1.9.2: glides, cycles, sweeps and a harmonic ladder, modeled on
   // programs offered by established consumer devices. Exploration settings. ---
   { "Evening Wind-Down",
@@ -221,12 +198,12 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
       {5.0f, WAVE_SQUARE, STEP_HOLD, 120}, {2.5f, WAVE_SQUARE, STEP_HOLD, 120} }, 8 },
 
   { "8-11 Hz Band Glide",
-    "Glides back and forth through 8-11 Hz, a band used by a leading mat brand. An exploration setting.",
+    "Glides back and forth through 8-11 Hz, a range common across consumer mats. An exploration setting.",
     { {8.0f, WAVE_SQUARE, STEP_HOLD, 60}, {11.0f, WAVE_SQUARE, STEP_RAMP, 240}, {8.0f, WAVE_SQUARE, STEP_RAMP, 240},
       {11.0f, WAVE_SQUARE, STEP_RAMP, 240}, {8.0f, WAVE_SQUARE, STEP_RAMP, 240} }, 5 },
 
   { "28-31 Hz Band Glide",
-    "Glides back and forth through 28-31 Hz, a second band used by the same brand. An exploration setting.",
+    "Glides back and forth through 28-31 Hz, another range common across consumer mats. An exploration setting.",
     { {28.0f, WAVE_SQUARE, STEP_HOLD, 60}, {31.0f, WAVE_SQUARE, STEP_RAMP, 240}, {28.0f, WAVE_SQUARE, STEP_RAMP, 240},
       {31.0f, WAVE_SQUARE, STEP_RAMP, 240}, {28.0f, WAVE_SQUARE, STEP_RAMP, 240} }, 5 },
 
@@ -241,16 +218,16 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
       {12.0f, WAVE_SQUARE, STEP_HOLD, 120}, {1.0f, WAVE_SQUARE, STEP_HOLD, 120} }, 8 },
 
   { "Sleep Descent",
-    "Structured like a published sleep-entrainment study design: follows the real alpha->theta->delta brainwave-band progression the body moves through when falling asleep. Band science is established; entrainment efficacy is still debated in the literature.",
+    "Steps down through the alpha, theta and delta ranges (8-12, 4-8, 0.5-4 Hz) the brain moves through when falling asleep. The ranges are established science; that a pulsed field can guide the brain through them has not been shown.",
     { {10.0f, WAVE_SQUARE, STEP_HOLD, 300}, {6.0f, WAVE_SQUARE, STEP_RAMP, 600}, {2.0f, WAVE_SQUARE, STEP_RAMP, 600} }, 3 },
 
   { "Wake Ascent",
-    "The reverse of Sleep Descent - delta->theta->alpha->beta, following the same real EEG band structure.",
+    "The reverse of Sleep Descent: delta, theta, alpha, then beta (13-30 Hz). Same established ranges; no effect is claimed.",
     { {2.0f, WAVE_SQUARE, STEP_HOLD, 120}, {6.0f, WAVE_SQUARE, STEP_RAMP, 300}, {10.0f, WAVE_SQUARE, STEP_RAMP, 300}, {20.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 4 },
 
   { "Calm & Focus",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {3.0f, WAVE_SQUARE, STEP_HOLD, 300}, {100.0f, WAVE_SQUARE, STEP_RAMP, 600}, {100.0f, WAVE_SQUARE, STEP_RAMP, 600} }, 3 },
+    { {3.0f, WAVE_SQUARE, STEP_HOLD, 300}, {10.0f, WAVE_SQUARE, STEP_RAMP, 600}, {14.0f, WAVE_SQUARE, STEP_RAMP, 600} }, 3 },
 
   { "Energy Reset",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
@@ -258,7 +235,7 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
 
   { "Post-Activity Recovery",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {12.0f, WAVE_SQUARE, STEP_HOLD, 300}, {50.0f, WAVE_SQUARE, STEP_RAMP, 600}, {10.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
+    { {12.0f, WAVE_SQUARE, STEP_HOLD, 300}, {22.0f, WAVE_SQUARE, STEP_RAMP, 600}, {10.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
 
   { "Grounding & Balance",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
@@ -274,11 +251,11 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
 
   { "Meeting Ready",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {18.0f, WAVE_SQUARE, STEP_HOLD, 180}, {100.0f, WAVE_SQUARE, STEP_RAMP, 420}, {100.0f, WAVE_SQUARE, STEP_HOLD, 300} }, 3 },
+    { {10.0f, WAVE_SQUARE, STEP_HOLD, 180}, {14.0f, WAVE_SQUARE, STEP_RAMP, 420}, {18.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
 
   { "Pre-Workout Prime",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {18.0f, WAVE_SQUARE, STEP_HOLD, 180}, {50.0f, WAVE_SQUARE, STEP_RAMP, 420}, {50.0f, WAVE_SQUARE, STEP_HOLD, 300} }, 3 },
+    { {15.0f, WAVE_SQUARE, STEP_HOLD, 180}, {25.0f, WAVE_SQUARE, STEP_RAMP, 420}, {28.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
 
   { "Travel Ease",
     "Built from this device's own general-wellness frequency list, not an independently published study. General comfort framing only.",
@@ -286,7 +263,7 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
 
   { "Screen Break",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {8.0f, WAVE_SQUARE, STEP_HOLD, 300}, {100.0f, WAVE_SQUARE, STEP_RAMP, 300}, {100.0f, WAVE_SQUARE, STEP_HOLD, 300} }, 3 },
+    { {8.0f, WAVE_SQUARE, STEP_HOLD, 300}, {12.0f, WAVE_SQUARE, STEP_RAMP, 300}, {14.0f, WAVE_SQUARE, STEP_HOLD, 300} }, 3 },
 
   { "Evening Unwind",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
@@ -294,11 +271,11 @@ static const Program SEQUENCES[NUM_SEQUENCES] = {
 
   { "Morning Meditation",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {7.83f, WAVE_SQUARE, STEP_HOLD, 600}, {2.0f, WAVE_SQUARE, STEP_RAMP, 600}, {33.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
+    { {7.83f, WAVE_SQUARE, STEP_HOLD, 600}, {6.0f, WAVE_SQUARE, STEP_RAMP, 600}, {10.0f, WAVE_SQUARE, STEP_RAMP, 300} }, 3 },
 
   { "Deep Focus Session",
     "Built from this device's own general-wellness frequency list, not an independently published study.",
-    { {8.0f, WAVE_SQUARE, STEP_HOLD, 300}, {100.0f, WAVE_SQUARE, STEP_RAMP, 600}, {100.0f, WAVE_SQUARE, STEP_HOLD, 900} }, 3 },
+    { {10.0f, WAVE_SQUARE, STEP_HOLD, 300}, {14.0f, WAVE_SQUARE, STEP_RAMP, 600}, {14.0f, WAVE_SQUARE, STEP_HOLD, 900} }, 3 },
 
   { "Center & Ground",
     "Built from this device's own general-wellness frequency list, not an independently published study.",

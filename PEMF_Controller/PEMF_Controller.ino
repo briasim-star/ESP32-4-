@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "2.0.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -446,16 +446,43 @@ bool nameHas(const char* name, const char* kw) {
 static const int NUM_NOISES = 3;
 static const char* NOISE_NAMES[NUM_NOISES] = {"white_noise", "pink_noise", "brown_noise"};
 static const char* NOISE_PATHS[NUM_NOISES] = {"noise:white", "noise:pink", "noise:brown"};
-int scapeCount() { return sdmedia_soundscapeCount() + NUM_NOISES; }
+// Solfeggio tones - pure tones from a sound/meditation tradition, generated
+// live ("tone:" paths). Offered as sound; no health effect is claimed.
+static const int NUM_SOLFEGGIO = 9;
+static const char* SOLF_NAMES[NUM_SOLFEGGIO] = {"solfeggio_174_hz", "solfeggio_285_hz", "solfeggio_396_hz", "solfeggio_417_hz",
+                                                "solfeggio_528_hz", "solfeggio_639_hz", "solfeggio_741_hz", "solfeggio_852_hz", "solfeggio_963_hz"};
+static const char* SOLF_PATHS[NUM_SOLFEGGIO] = {"tone:174", "tone:285", "tone:396", "tone:417", "tone:528", "tone:639", "tone:741", "tone:852", "tone:963"};
+// What each tone is traditionally associated with - shown when it's picked.
+static const char* SOLF_INFO[NUM_SOLFEGGIO] = {
+  "174 Hz: the tradition's foundation tone.",
+  "285 Hz: traditionally linked with renewal.",
+  "396 Hz: traditionally linked with letting go.",
+  "417 Hz: traditionally linked with change.",
+  "528 Hz: called the \"love frequency\".",
+  "639 Hz: traditionally linked with connection.",
+  "741 Hz: traditionally linked with expression.",
+  "852 Hz: traditionally linked with intuition.",
+  "963 Hz: the \"God frequency\" - oneness."};
+
+int scapeCount() { return sdmedia_soundscapeCount() + NUM_NOISES + NUM_SOLFEGGIO; }
 const char* scapeName(int i) {
   int n = sdmedia_soundscapeCount();
   if (i >= 0 && i < n) return sdmedia_soundscapeName(i);
-  return (i >= n && i < n + NUM_NOISES) ? NOISE_NAMES[i - n] : "";
+  if (i >= n && i < n + NUM_NOISES) return NOISE_NAMES[i - n];
+  if (i >= n + NUM_NOISES && i < n + NUM_NOISES + NUM_SOLFEGGIO) return SOLF_NAMES[i - n - NUM_NOISES];
+  return "";
 }
 const char* scapePath(int i) {
   int n = sdmedia_soundscapeCount();
   if (i >= 0 && i < n) return sdmedia_soundscapePath(i);
-  return (i >= n && i < n + NUM_NOISES) ? NOISE_PATHS[i - n] : "";
+  if (i >= n && i < n + NUM_NOISES) return NOISE_PATHS[i - n];
+  if (i >= n + NUM_NOISES && i < n + NUM_NOISES + NUM_SOLFEGGIO) return SOLF_PATHS[i - n - NUM_NOISES];
+  return "";
+}
+// The tradition note for a Solfeggio entry, or nullptr for any other sound.
+const char* scapeInfo(int i) {
+  int k = i - sdmedia_soundscapeCount() - NUM_NOISES;
+  return (k >= 0 && k < NUM_SOLFEGGIO) ? SOLF_INFO[k] : nullptr;
 }
 
 // Picks a soundscape that suits the session - matched by file name, so
@@ -2992,8 +3019,12 @@ void drawSoundscapesScreen() {
   snprintf(vol, sizeof(vol), "%s %d%%", audioUsingBluetooth() ? "BT volume" : "Volume", volumePercent);
   drawValueRow(btnSndVolMinus, btnSndVolPlus, vol);
   drawPagerRow(btnSndPrevPage, btnSndBack, btnSndNextPage, soundscapesPage, (count + SOUNDSCAPES_PER_PAGE - 1) / SOUNDSCAPES_PER_PAGE);
-  if (soundscapesOrigin != SCR_RUN) {
-    drawFittedText(18, 272, 444, "Tap to preview, tap again to stop.", FONT_SM, MADD_DIM, MADD_PANEL);
+  const char* info = highlighted >= 0 ? scapeInfo(highlighted) : nullptr;
+  if (info) { // Solfeggio tone picked: what it is, honestly
+    drawFittedText(18, 270, 330, info, FONT_SM, MADD_CYAN, MADD_PANEL);
+    drawFittedText(18, 290, 444, "Solfeggio is a sound tradition - no health effect is claimed.", FONT_SM, MADD_DIM, MADD_PANEL);
+  } else if (soundscapesOrigin != SCR_RUN) {
+    drawFittedText(18, 272, 330, "Tap to preview, tap again to stop.", FONT_SM, MADD_DIM, MADD_PANEL);
   }
 }
 
