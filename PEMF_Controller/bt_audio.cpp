@@ -95,7 +95,10 @@ static float carrierFor(float f) {
 static void renderTone(StereoFrame* out, int n) {
   float f = g_toneHz;
   if (f <= 0) f = 10.0f;
-  const float CARRIER_HZ = carrierFor(f);
+  // On the small onboard speaker the same note plays one octave up: tiny
+  // speakers are far more efficient there (sounds much louder) and the cone
+  // moves less, which is easier on the speaker.
+  const float CARRIER_HZ = carrierFor(f) * (g_output == AUDIO_OUT_SPEAKER ? 2.0f : 1.0f);
   bool binaural = (f <= BINAURAL_MAX_HZ) && g_headphones && g_output == AUDIO_OUT_BLUETOOTH;
   const float amp = 32767.0f * TONE_LEVEL;
   for (int i = 0; i < n; i++) {
@@ -681,8 +684,11 @@ void audio_setVolume(uint8_t percent) {
     // keeps the top clean). 0% = silent.
     if (percent == 0) g_volume = 0.0f;
     else {
-      float db = (percent <= 55) ? (percent - 55) * 0.7f : (percent - 55) * 0.15f; // 5% is ~35 dB below 55%
-      g_volume = powf(10.0f, (db + 6.0f) / 20.0f); // +6 dB: the onboard speaker was too quiet at every setting
+      // 55% now gives what 100% used to (+13 dB drive); 5% stays as quiet as
+      // before. Above 55% only +2 dB more: the DAC is already at full scale
+      // there and the soft limiter keeps peaks from hard-clipping the speaker.
+      float db = (percent <= 55) ? (percent - 55) * 0.84f : (percent - 55) * 0.045f;
+      g_volume = powf(10.0f, (db + 13.0f) / 20.0f);
     }
   }
 }
