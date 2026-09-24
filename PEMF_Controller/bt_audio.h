@@ -51,7 +51,10 @@ const char* audio_btDeviceName();
 void audio_btConnect();                    // non-blocking; starts the A2DP stack toward the saved name
 bool audio_btStarted();
 bool audio_btIsConnected();
-void audio_btEnd();                        // full teardown - call before ESP.restart()
+// Full teardown - call before ESP.restart(). releaseMemory=true also frees the
+// Bluetooth controller's RAM (needed for the HTTPS update download); BT then
+// can't restart until the next reboot.
+void audio_btEnd(bool releaseMemory = false);
 
 // Device discovery (open scan). Picking a result saves the name; the
 // connection itself is made after a restart (the one pattern that has

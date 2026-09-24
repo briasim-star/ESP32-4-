@@ -477,9 +477,9 @@ void audio_btConnect() {
 bool audio_btStarted() { return g_btStarted; }
 bool audio_btIsConnected() { return g_btStarted && a2dp.is_connected(); }
 
-void audio_btEnd() {
+void audio_btEnd(bool releaseMemory) {
   if (g_btStarted) {
-    a2dp.end();
+    a2dp.end(releaseMemory);
     g_btStarted = false;
   }
 }

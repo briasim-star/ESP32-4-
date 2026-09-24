@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.3.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.3.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1950,6 +1950,26 @@ void handleUpdateTouch(int x, int y) {
   if (otaChecking) return; // ignore taps while a blocking check/install is underway
 
   if (touchInRect(x, y, btnOtaAction)) {
+    if (!wifitime_isConfigured()) {
+      tft.fillScreen(COLOR_BG);
+      tft.setFreeFont(FONT_LG);
+      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString("Set up WiFi first", 240, 140);
+      tft.setFreeFont(FONT_SM);
+      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.drawString("Settings -> Set Up WiFi, then try again.", 240, 175);
+      delay(2500);
+      screen = SCR_UPDATE;
+      return;
+    }
+    // Updates need the secure (HTTPS) connection's memory: stop any session
+    // and shut Bluetooth down first. The device restarts after an update,
+    // which brings Bluetooth back automatically.
+    endSession();
+    audio_setSource(AUDIO_SRC_OFF);
+    if (audio_btStarted()) audio_btEnd(true);
+
     if (!otaChecked) {
       otaChecking = true;
       tft.fillScreen(COLOR_BG);
