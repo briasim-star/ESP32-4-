@@ -41,6 +41,11 @@
 #define TOUCH_CS   33
 #define TOUCH_IRQ  36
 
+// ---- Onboard battery (BAT connector) -----------------------------------
+// The board divides the battery voltage by 2 onto IO34 (per the board's
+// own "Get Battery Voltage" demo). ADC1 pin - readable while Bluetooth runs.
+#define PIN_BAT_VOLT 34
+
 // ---- Onboard RGB status LED (common anode: LOW = on) -------------------
 #define LED_R 22
 #define LED_G 16

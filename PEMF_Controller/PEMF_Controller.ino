@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.9"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -625,7 +625,64 @@ void topStatusText(char* buf, size_t len) {
 // Top-right status badge: a small panel with a colored dot and where the
 // sound goes ("X20" / "Speaker"). Dot: green = connected, amber = working
 // on it or not found, cyan = device speaker.
-char lastTopStatus[24] = "";
+// ---- Battery (the board's own battery on its BAT connector) ------------
+// Estimated from voltage along a typical lithium discharge curve - about
+// +/-10%, like most simple battery meters. -1 = no battery detected.
+int batteryMv = 0, batteryPct = -1;
+bool batteryCharging = false;       // best guess: voltage has been rising
+unsigned long batteryBannerUntil = 0;
+
+int batteryPercentFor(int mv) {
+  static const int MV[]  = {3300, 3500, 3600, 3650, 3700, 3750, 3800, 3900, 4000, 4100, 4180};
+  static const int PCT[] = {   0,    5,   12,   20,   30,   40,   50,   65,   80,   92,  100};
+  if (mv <= MV[0]) return 0;
+  for (int i = 1; i < 11; i++)
+    if (mv < MV[i]) return PCT[i - 1] + (PCT[i] - PCT[i - 1]) * (mv - MV[i - 1]) / (MV[i] - MV[i - 1]);
+  return 100;
+}
+
+void updateBattery() {
+  static unsigned long last = 0, trendAt = 0;
+  static int trendMv = 0;
+  if (last && millis() - last < 10000) return; // every 10 s
+  last = millis();
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(PIN_BAT_VOLT);
+  int mv = (int)(sum / 16) * 2; // the board divides by 2
+  if (mv < 2800 || mv > 4500) { batteryPct = -1; batteryMv = 0; return; } // nothing sensible connected
+  batteryMv = batteryMv ? (batteryMv * 3 + mv) / 4 : mv;
+  batteryPct = batteryPercentFor(batteryMv);
+  if (!trendAt) { trendAt = millis(); trendMv = batteryMv; }
+  else if (millis() - trendAt > 120000UL) { // compare with 2 minutes ago
+    if (batteryMv > trendMv + 15) batteryCharging = true;
+    else if (batteryMv < trendMv - 10) batteryCharging = false;
+    trendAt = millis(); trendMv = batteryMv;
+  }
+  // Low-battery warnings (once each; re-armed after charging past 25%)
+  static bool warned15 = false, warned5 = false;
+  if (batteryPct > 25) { warned15 = false; warned5 = false; }
+  if (!batteryCharging && batteryPct <= 5 && !warned5) {
+    warned5 = warned15 = true;
+    drawBootBanner("Battery very low - plug in now", COLOR_DANGER);
+    batteryBannerUntil = millis() + 6000;
+  } else if (!batteryCharging && batteryPct <= 15 && !warned15) {
+    warned15 = true;
+    drawBootBanner("Battery low - plug in soon", COLOR_WARN);
+    batteryBannerUntil = millis() + 6000;
+  }
+}
+
+// Small battery drawing: outline, tip, fill by charge (green / amber / red).
+void drawBatteryIcon(int x, int y, int pct) {
+  uint16_t c = pct <= 15 ? COLOR_DANGER : pct <= 30 ? COLOR_WARN : COLOR_GOOD;
+  tft.drawRect(x, y, 20, 10, MADD_TEXT);
+  tft.fillRect(x + 20, y + 3, 2, 4, MADD_TEXT);
+  int w = pct * 16 / 100;
+  if (w < 1) w = 1;
+  tft.fillRect(x + 2, y + 2, w, 6, batteryCharging ? MADD_CYAN : c);
+}
+
+char lastTopStatus[40] = "";
 int topBadgeX = 302;          // left edge of the status badge (the clock sits just left of it)
 char homeClockText[16] = "";  // what the Home clock last drew ("" = redraw)
 
@@ -684,8 +741,9 @@ void drawHomeClock() {
 }
 
 void drawTopStatus(bool force) {
-  char key[24];
-  topStatusText(key, sizeof(key));
+  char key[40], base[24];
+  topStatusText(base, sizeof(base));
+  snprintf(key, sizeof(key), "%s|%d|%d", base, batteryPct < 0 ? -1 : batteryPct / 5, batteryCharging); // redraw when the battery moves 5%
   if (!force && strcmp(key, lastTopStatus) == 0) return;
   strcpy(lastTopStatus, key);
   fillAurora(300, 6, 164, 30);
@@ -697,14 +755,23 @@ void drawTopStatus(bool force) {
     dot = st == BT_STATUS_CONNECTED ? COLOR_GOOD : st == BT_STATUS_NOT_FOUND ? COLOR_WARN : MADD_SPECTRUM[0];
   }
   tft.setFreeFont(FONT_SM);
-  int w = tft.textWidth(label) + 34;
-  if (w > 160) w = 160;
+  char pctText[8] = "";
+  if (batteryPct >= 0) snprintf(pctText, sizeof(pctText), "%d%%", batteryPct);
+  int batW = batteryPct >= 0 ? tft.textWidth(pctText) + 34 : 0; // icon + percent
+  int nameW = tft.textWidth(label);
+  if (nameW > 110) nameW = 110;
+  int w = nameW + 34 + batW;
   Rect r = {462 - w, 7, w, 26};
   topBadgeX = r.x;
   homeClockText[0] = 0; // the Home clock re-lays itself out next to the badge
   drawChamfer(r, MADD_PANEL, MADD_EDGE, 6);
   tft.fillCircle(r.x + 13, r.y + 13, 4, dot);
-  drawFittedText(r.x + 24, r.y + 5, w - 30, label, FONT_SM, MADD_TEXT, MADD_PANEL);
+  drawFittedText(r.x + 24, r.y + 5, nameW, label, FONT_SM, MADD_TEXT, MADD_PANEL);
+  if (batteryPct >= 0) {
+    int bx = r.x + 24 + nameW + 8;
+    drawBatteryIcon(bx, r.y + 8, batteryPct);
+    drawFittedText(bx + 26, r.y + 5, batW - 26, pctText, FONT_SM, MADD_TEXT, MADD_PANEL);
+  }
 }
 
 // Top bar: badge + title on the left, live status on the right, spectrum stripe under it.
@@ -1695,9 +1762,20 @@ void powerOff() {
   tft.drawString("Turning off", 240, 140);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Press BOOT to turn back on.", 240, 175);
+  // Tap-to-wake uses the touch panel's "touched" line (IO36). It only works
+  // if that line rests HIGH once the finger is lifted - check first, and
+  // say plainly which way turns it back on.
+  pinMode(TOUCH_IRQ, INPUT);
+  uint16_t tx, ty;
+  unsigned long w0 = millis();
+  while ((tft.getTouch(&tx, &ty) || digitalRead(TOUCH_IRQ) == LOW) && millis() - w0 < 3000) delay(20);
+  tft.getTouchRawZ(); // leaves the touch chip listening, so a tap pulls the line LOW
+  delay(50);
+  bool touchWake = (digitalRead(TOUCH_IRQ) == HIGH);
+  tft.drawString(touchWake ? "Tap the screen to turn it back on." : "Press the BOOT button to turn it back on.", 240, 175);
   tft.setTextDatum(TL_DATUM);
-  delay(1200);
+  Serial.printf("[POWER] off - wake by %s\n", touchWake ? "screen tap or BOOT" : "BOOT only");
+  delay(2500);
   audio_btEnd();
 
   // Lock every output that could drive something in a safe OFF state.
@@ -1713,7 +1791,41 @@ void powerOff() {
   while (digitalRead(BOOT_BTN) == LOW) delay(10); // wait for release, or it would wake instantly
   delay(200);
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);    // BOOT pressed = wake
+  if (touchWake) esp_sleep_enable_ext1_wakeup(1ULL << TOUCH_IRQ, ESP_EXT1_WAKEUP_ALL_LOW); // screen tap = wake
   esp_deep_sleep_start();
+}
+
+// "Turn off?" - explains what happens and how to turn it back on, then
+// asks. Returns true if the person chose Turn off. (Settings -> Turn Off)
+bool confirmTurnOff() {
+  drawAuroraBackground();
+  Rect c = {30, 40, 420, 190};
+  drawChamfer(c, MADD_PANEL, MADD_MAGENTA, 12);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+  tft.drawString("Turn off?", 240, 72);
+  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+  tft.drawString("Any session and sound stop, and the screen goes dark.", 240, 112);
+  tft.drawString("To turn it back on, tap the screen.", 240, 140);
+  tft.drawString("(If a tap doesn't wake it, press the BOOT button.)", 240, 164);
+  tft.drawString("Unplug it too if it won't be used for a while.", 240, 196);
+  tft.setTextDatum(TL_DATUM);
+  Rect yes = {50, 244, 180, 50}, no = {250, 244, 180, 50};
+  drawChamferButton(yes, "Turn off", tft.color565(58, 13, 26), MADD_SPECTRUM[2], MADD_TEXT, FONT_LG);
+  drawChamferButton(no, "Cancel", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  uint16_t x, y;
+  while (tft.getTouch(&x, &y)) delay(20); // let go of the Settings tap first
+  unsigned long t0 = millis();
+  while (millis() - t0 < 30000) {       // 30 s without an answer = Cancel
+    if (tft.getTouch(&x, &y)) {
+      bool on = touchInRect(x, y, yes), off = touchInRect(x, y, no);
+      while (tft.getTouch(&x, &y)) delay(20);
+      if (on) return true;
+      if (off) return false;
+    }
+    delay(20);
+  }
+  return false;
 }
 
 // Called every loop(). Handles tap / double-tap-to-off / long-hold reset.
@@ -1771,6 +1883,7 @@ Screen logOrigin = SCR_SETTINGS;     // where "< Session Log" goes back to: Sett
 // ---------------------------------------------------------------------
 int buildVisibleSettingsItems(SettingsItemId* out) {
   int n = 0;
+  out[n++] = SET_TURN_OFF;   // first, where it's easy to find
   out[n++] = SET_DEV_MODE;
   out[n++] = SET_AUDIO_OUT;
   out[n++] = SET_CHECK_UPDATES;
@@ -1854,6 +1967,9 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       break;
     case SET_TIMEZONE:
       snprintf(labelOut, labelLen, "Time zone: %s", wifitime_tzName(wifitime_tzIndex()));
+      break;
+    case SET_TURN_OFF:
+      snprintf(labelOut, labelLen, "Turn Off");
       break;
     case SET_CHECKIN:
       snprintf(labelOut, labelLen, checkInEnabled ? "Ask how I feel: On" : "Ask how I feel: Off");
@@ -1948,6 +2064,11 @@ void handleSettingsItemTap(SettingsItemId id) {
     case SET_RECAL_TOUCH:
       runTouchCalibration(); // blocking; Settings redraws right after
       screen = SCR_SETTINGS;
+      break;
+    case SET_TURN_OFF:
+      if (confirmTurnOff()) powerOff(); // powerOff() never returns
+      screen = SCR_SETTINGS;
+      fullRedrawRequested = true;
       break;
     case SET_TIMEZONE: // all zones on one screen
       tzFromSetup = false;
@@ -4295,7 +4416,12 @@ void setup() {
   // pressing constantly (e.g. a bezel resting on the touch film) never
   // releases - that gets a clear warning instead of a bad calibration.
   bool forceCal = false;
-  if (tft.getTouchRawZ() > 350) {
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
+    // Turned on by tapping the screen - that finger is still down. Just wait
+    // for it to lift; it is not a request to recalibrate.
+    unsigned long t0 = millis();
+    while (tft.getTouchRawZ() > 350 && millis() - t0 < 4000) delay(20);
+  } else if (tft.getTouchRawZ() > 350) {
     tft.fillScreen(COLOR_BG);
     tft.setFreeFont(FONT_LG);
     tft.setTextColor(TFT_WHITE, COLOR_BG);
@@ -4339,6 +4465,10 @@ void setup() {
     ESP.restart();
   }
   Serial.printf("[MEM] free after startup: %u bytes\n", ESP.getFreeHeap());
+  updateBattery();
+  Serial.printf("[BAT] %d mV -> %d%% (-1 = no battery)\n", batteryMv, batteryPct);
+  pinMode(TOUCH_IRQ, INPUT);
+  Serial.printf("[POWER] touch line at rest: %s (HIGH = tap-to-wake can work)\n", digitalRead(TOUCH_IRQ) ? "HIGH" : "LOW");
   resumeSleepNightIfSaved();
 }
 
@@ -4411,6 +4541,9 @@ void loop() {
   }
 
   updateProgram();
+
+  updateBattery();
+  if (batteryBannerUntil && millis() > batteryBannerUntil) { batteryBannerUntil = 0; fullRedrawRequested = true; }
 
   // Volume / sound choice: saved when you leave the session (or 4 s after
   // the last tap if nothing is playing) - never while sound is playing,
