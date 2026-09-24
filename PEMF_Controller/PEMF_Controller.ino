@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.6"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.7"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1659,14 +1659,14 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       }
       break;
     case SET_AUDIO_OUT:
-      snprintf(labelOut, labelLen, audioUsingBluetooth() ? "Sound Out: Bluetooth" : "Sound Out: Speaker");
+      snprintf(labelOut, labelLen, audioUsingBluetooth() ? "Sound: Bluetooth" : "Sound: Device speaker");
       *activeOut = true;
       break;
     case SET_CHECK_UPDATES:
       snprintf(labelOut, labelLen, "Check for Updates");
       break;
     case SET_BT_DEVICE:
-      if (strlen(btDeviceName) > 0) snprintf(labelOut, labelLen, "BT: %s", btDeviceName);
+      if (strlen(btDeviceName) > 0) snprintf(labelOut, labelLen, "Bluetooth: %s", btDeviceName);
       else snprintf(labelOut, labelLen, "Set Up Bluetooth");
       break;
     case SET_ROOM_OR_PEOPLE:
@@ -1698,14 +1698,14 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
         snprintf(labelOut, labelLen, wifiForgetArmed ? "Tap again to forget" : "WiFi: Forget Network");
         *colorOut = wifiForgetArmed ? COLOR_DANGER : COLOR_MUTED; *activeOut = wifiForgetArmed;
       } else {
-        snprintf(labelOut, labelLen, "Set Up WiFi (for timestamps)");
+        snprintf(labelOut, labelLen, "Set Up WiFi");
       }
       break;
     case SET_VIEW_LOG:
       snprintf(labelOut, labelLen, "Session Log");
       break;
     case SET_SOUNDSCAPES:
-      snprintf(labelOut, labelLen, "Soundscapes (%d)", sdmedia_soundscapeCount());
+      snprintf(labelOut, labelLen, "Soundscapes");
       break;
     case SET_RECAL_TOUCH:
       snprintf(labelOut, labelLen, "Recalibrate Touch");
@@ -1803,49 +1803,26 @@ const int SETTINGS_PER_PAGE = 6;
 Rect settingsItemRects[SETTINGS_PER_PAGE];
 SettingsItemId settingsVisibleItems[SET_ITEM_COUNT];
 int settingsVisibleCount = 0;
-Rect btnSetPrev = {20, 254, 220, 46};
-Rect btnSetNext = {260, 254, 200, 46};
+// Same bottom row as the session lists: < Prev | Back | Next >
+Rect btnSetPrev = {18, 222, 140, 42};
+Rect btnSetBack = {170, 222, 140, 42};
+Rect btnSetNext = {322, 222, 140, 42};
+void drawPagerRow(Rect prev, Rect back, Rect next, int page, int pages); // defined with the lists
 
 void drawSettingsScreen() {
-  drawAuroraBackground(); // MADD look (stage 2)
-  tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("Settings", 20, 12);
-
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  char tierBuf[48];
-  if (strlen(ownerName) > 0) {
-    char shown[24];
-    formatDisplayName(ownerName, shown, sizeof(shown));
-    snprintf(tierBuf, sizeof(tierBuf), "%s - %s", HW_TIER_NAME, shown);
-  } else {
-    snprintf(tierBuf, sizeof(tierBuf), "%s", HW_TIER_NAME);
-  }
-  drawFittedText(20, 50, 330, tierBuf, FONT_SM, COLOR_TEXT_DIM, COLOR_BG); // constrained so a long name can't run into the Home button
-
-  drawHomeButton();
+  drawAuroraBackground();
+  drawTopBar("Settings", true, true);
 
   settingsVisibleCount = buildVisibleSettingsItems(settingsVisibleItems);
   int totalPages = (settingsVisibleCount + SETTINGS_PER_PAGE - 1) / SETTINGS_PER_PAGE;
   if (totalPages < 1) totalPages = 1;
   if (settingsPage >= totalPages) settingsPage = 0; // safety, if fewer items are visible now than before
 
-  if (totalPages > 1) {
-    char pageBuf[20];
-    snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", settingsPage + 1, totalPages);
-    tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 348, 20);
-    tft.setTextDatum(TL_DATUM);
-  }
-
   int start = settingsPage * SETTINGS_PER_PAGE;
-  int colW = 220, rowH = 48, gapX = 20, gapY = 10;
   for (int i = 0; i < SETTINGS_PER_PAGE; i++) {
     int idx = start + i;
     int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 64 + row * (rowH + gapY), colW, rowH};
+    Rect r = {18 + col * 225, 52 + row * 54, 219, 48}; // same grid as the session lists
     settingsItemRects[i] = r;
     if (idx < settingsVisibleCount) {
       char label[48];
@@ -1856,10 +1833,7 @@ void drawSettingsScreen() {
     }
   }
 
-  if (totalPages > 1) {
-    drawButton(btnSetPrev, "< Prev");
-    drawButton(btnSetNext, "Next >");
-  }
+  drawPagerRow(btnSetPrev, btnSetBack, btnSetNext, settingsPage, totalPages);
 
   if (devModeJustUnlocked) { // one-time confirmation right after the PIN
     devModeJustUnlocked = false;
@@ -1872,6 +1846,7 @@ void drawSettingsScreen() {
 
 void handleSettingsTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
+  if ((y < 36 && x < 300) || touchInRect(x, y, btnSetBack)) { screen = SCR_CATEGORY; return; } // "< Settings" / Back
   int start = settingsPage * SETTINGS_PER_PAGE;
   for (int i = 0; i < SETTINGS_PER_PAGE; i++) {
     int idx = start + i;
@@ -3099,7 +3074,7 @@ void outputStatusText(char* buf, size_t len) {
     }
     // Plain words on screen; the technical detail goes to the USB cable only.
     static int lastDiag = -1;
-    int diag = !audio_btIsConnected() ? 0 : !flowing ? 1 : (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() == 0) ? 2 : 3;
+    int diag = !audio_btIsConnected() ? 0 : !flowing ? 1 : (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() <= 2) ? 2 : 3; // <= 2: the inaudible keep-awake signal
     if (diag != lastDiag) {
       const char* names[] = {"not connected", "connected, no audio requested", "streaming silence", "streaming audio"};
       Serial.printf("[BT] %s\n", names[diag]);

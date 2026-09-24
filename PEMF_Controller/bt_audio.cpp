@@ -402,9 +402,13 @@ static void speakerInit() {
 static uint16_t dacBuf[256 * 2];
 static StereoFrame spkFrames[256];
 
+// Whether the speaker amplifier is switched on. Shared with speakerQuiet():
+// switching to Bluetooth turns the amp off, so this must be cleared there too -
+// otherwise switching back quickly left the amp off and the speaker silent.
+static bool ampOn = false;
+
 static void speakerPump() {
   static unsigned long silentSince = 0;
-  static bool ampOn = false;
 
   renderFrames(spkFrames, 256);
 
@@ -442,6 +446,7 @@ static void speakerQuiet() {
   if (g_output == AUDIO_OUT_SPEAKER) { quieted = false; return; }
   if (!quieted) {
     digitalWrite(AUDIO_ENABLE, HIGH);
+    ampOn = false;
     if (g_speakerReady) i2s_zero_dma_buffer(SPK_I2S_PORT);
     quieted = true;
   }
@@ -466,6 +471,18 @@ static int32_t btDataCallback(Frame* data, int32_t len) {
     memset(data, 0, len * sizeof(Frame));
   } else {
     renderFrames((StereoFrame*)data, len);
+  }
+  // Keep-awake: many Bluetooth speakers mute themselves on pure digital
+  // silence and are slow to wake, so a tone tapped on after silence wasn't
+  // heard until something else nudged the speaker. A +/-1 step signal
+  // (about -90 dB, far below hearing) keeps the speaker awake.
+  static uint32_t kaLcg = 0x9E3779B9u;
+  StereoFrame* ka = (StereoFrame*)data;
+  for (int32_t i = 0; i < len; i++) {
+    kaLcg = kaLcg * 1664525u + 1013904223u;
+    int16_t d = (int16_t)((kaLcg >> 30) & 1) * 2 - 1; // -1 or +1
+    if (ka[i].l < 32767 && ka[i].l > -32768) ka[i].l += d;
+    if (ka[i].r < 32767 && ka[i].r > -32768) ka[i].r -= d;
   }
   int16_t peak = 0;
   StereoFrame* f = (StereoFrame*)data;
