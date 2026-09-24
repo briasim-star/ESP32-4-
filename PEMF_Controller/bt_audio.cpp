@@ -277,6 +277,15 @@ static void serviceSoundscapeFile() {
 // ---------------------------------------------------------------------------
 static AudioSource renderingSource = AUDIO_SRC_OFF;
 static const float SCAPE_GAIN = 1.0f; // no boost - boosting clipped the loud parts (rain hits, thunder) into static
+// Gentle limiter: below ~73% of full scale nothing changes; above it, peaks
+// are squeezed instead of chopped off, so loud settings stay clean.
+static inline int16_t softLimit(float v) {
+  const float knee = 24000.0f;
+  float a = v < 0 ? -v : v;
+  if (a > knee) a = knee + (a - knee) * 0.25f;
+  if (a > 32767.0f) a = 32767.0f;
+  return (int16_t)(v < 0 ? -a : a);
+}
 // Keeps boosted audio from wrapping around (which sounds like loud crackles).
 static inline int16_t clip16(float v) {
   if (v > 32767.0f) return 32767;
@@ -301,8 +310,8 @@ static void renderFrames(StereoFrame* out, int n) {
     if (switching) { fadeGain -= FADE_STEP; if (fadeGain < 0) fadeGain = 0; }
     else if (fadeGain < 1.0f) { fadeGain += FADE_STEP; if (fadeGain > 1.0f) fadeGain = 1.0f; }
     float g = fadeGain * vol * srcGain;
-    out[i].l = clip16(out[i].l * g);
-    out[i].r = clip16(out[i].r * g);
+    out[i].l = softLimit(out[i].l * g);
+    out[i].r = softLimit(out[i].r * g);
   }
   if (switching && fadeGain <= 0.0f) {
     renderingSource = want;
@@ -539,9 +548,9 @@ const char* audio_soundscapeFile() { return currentPath; }
 
 void audio_setVolume(uint8_t percent) {
   if (percent > 100) percent = 100;
-  // Ears hear loudness on a curve, not a straight line - this makes 50% sound
-  // like half volume instead of nearly full.
-  g_volume = powf(percent / 100.0f, 1.8f);
+  // 55% = the level that sounded right in testing; 100% is ~5 dB louder.
+  // Anything that would clip is softened by the limiter in renderFrames().
+  g_volume = percent / 55.0f;
 }
 
 void audio_setHeadphonesMode(bool on) { g_headphones = on; }
