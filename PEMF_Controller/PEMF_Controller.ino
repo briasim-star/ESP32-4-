@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.3.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.4.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -69,6 +69,10 @@ const GFXfont* FONT_XL = &FreeSansBold18pt7b;  // screen titles, headline values
 // ---------------------------------------------------------------------
 uint16_t COLOR_BG, COLOR_PANEL, COLOR_PANEL_LIT, COLOR_ACCENT,
          COLOR_GOOD, COLOR_DANGER, COLOR_WARN, COLOR_MUTED, COLOR_TEXT_DIM;
+uint16_t MADD_PANEL, MADD_EDGE, MADD_MAGENTA, MADD_CYAN, MADD_COIL2, MADD_TEXT, MADD_DIM;
+uint16_t MADD_SPECTRUM[6]; // orange, coral, pink, magenta, violet, blue
+static const int AURORA_BANDS = 16;
+uint16_t AURORA[AURORA_BANDS];
 
 void initTheme() {
   COLOR_BG        = tft.color565(6, 8, 14);     // near-black
@@ -80,6 +84,22 @@ void initTheme() {
   COLOR_WARN      = tft.color565(230, 175, 60); // warning/caution - used ONLY for warnings
   COLOR_MUTED     = tft.color565(50, 56, 68);   // inactive/back tone
   COLOR_TEXT_DIM  = tft.color565(160, 170, 185);
+
+  // MADD brand palette - from the hex badge and Tesla-coil art
+  MADD_PANEL   = tft.color565(18, 10, 36);    // panel fill over the aurora
+  MADD_EDGE    = tft.color565(74, 53, 112);   // quiet panel outline
+  MADD_MAGENTA = tft.color565(232, 62, 156);  // badge neon
+  MADD_CYAN    = tft.color565(63, 216, 255);  // coil rings
+  MADD_COIL2   = tft.color565(91, 124, 255);
+  MADD_TEXT    = tft.color565(244, 238, 255);
+  MADD_DIM     = tft.color565(183, 169, 214);
+  const uint8_t spec[6][3] = {{255,166,43},{255,107,69},{232,69,122},{181,60,201},{123,70,230},{47,139,255}};
+  for (int i = 0; i < 6; i++) MADD_SPECTRUM[i] = tft.color565(spec[i][0], spec[i][1], spec[i][2]);
+  // Aurora: deep indigo at the top blending to plum at the bottom
+  for (int i = 0; i < AURORA_BANDS; i++) {
+    float t = (float)i / (AURORA_BANDS - 1);
+    AURORA[i] = tft.color565(13 + (int)(35 * t), 8 + (int)(3 * t), 38 + (int)(13 * t));
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -353,6 +373,38 @@ void applyAudioOutput() {
   }
 }
 
+// Plain-language Bluetooth status, so nobody is left wondering whether it works.
+void btStatusText(char* buf, size_t len) {
+  switch (audio_btStatus()) {
+    case BT_STATUS_SEARCHING:    snprintf(buf, len, "Looking for %s...", btDeviceName); break;
+    case BT_STATUS_CONNECTING:   snprintf(buf, len, "Connecting to %s...", btDeviceName); break;
+    case BT_STATUS_CONNECTED:    snprintf(buf, len, "Connected: %s", btDeviceName); break;
+    case BT_STATUS_RECONNECTING: snprintf(buf, len, "Reconnecting to %s...", btDeviceName); break;
+    case BT_STATUS_NOT_FOUND:    snprintf(buf, len, "%s not found - tap to retry", btDeviceName); break;
+    default:                     snprintf(buf, len, audioUsingBluetooth() ? "Bluetooth starting..." : "Sound: onboard speaker"); break;
+  }
+}
+
+uint16_t btStatusColor() {
+  switch (audio_btStatus()) {
+    case BT_STATUS_CONNECTED: return COLOR_GOOD;
+    case BT_STATUS_NOT_FOUND: return COLOR_WARN;
+    default:                  return COLOR_ACCENT;
+  }
+}
+
+// One status line, used on the Bluetooth screen.
+void drawBtStatusLine(int x, int y, int w) {
+  tft.fillRect(x - 2, y - 2, w + 4, 18, COLOR_BG);
+  if (!audioUsingBluetooth()) {
+    drawFittedText(x, y, w, "Sound plays on the onboard speaker", FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+    return;
+  }
+  char buf[48];
+  btStatusText(buf, sizeof(buf));
+  drawFittedText(x, y, w, buf, FONT_SM, btStatusColor(), COLOR_BG);
+}
+
 // Case-insensitive "does name contain keyword"
 bool nameHas(const char* name, const char* kw) {
   size_t n = strlen(name), k = strlen(kw);
@@ -406,6 +458,151 @@ bool splashOnScreen = false;
 void drawSplashBackground() {
   if (splashOnScreen) { splashOnScreen = false; return; }
   if (!sdmedia_showSplash()) tft.fillScreen(COLOR_BG);
+}
+
+// =====================================================================
+// MADD look: aurora background, cut-corner panels, hex badge, top bar.
+// Everything is simple shapes, so it draws fast on this display.
+// =====================================================================
+uint16_t auroraAt(int y) {
+  int b = y * AURORA_BANDS / 320;
+  if (b < 0) b = 0;
+  if (b >= AURORA_BANDS) b = AURORA_BANDS - 1;
+  return AURORA[b];
+}
+
+// Repaints just the background inside a rectangle (used to erase text).
+void fillAurora(int x, int y, int w, int h) {
+  const int bandH = 320 / AURORA_BANDS;
+  int yEnd = y + h;
+  while (y < yEnd) {
+    int next = ((y / bandH) + 1) * bandH;
+    if (next > yEnd) next = yEnd;
+    tft.fillRect(x, y, w, next - y, auroraAt(y));
+    y = next;
+  }
+}
+
+void drawAuroraBackground() {
+  fillAurora(0, 0, 480, 320);
+  // faint magnetic field lines
+  uint16_t f1 = tft.color565(40, 30, 88), f2 = tft.color565(52, 30, 96);
+  tft.drawEllipse(240, 176, 150, 190, f1);
+  tft.drawEllipse(240, 176, 230, 215, f2);
+  // sparkles
+  const int16_t sp[][2] = {{70,52},{418,140},{310,222},{36,212},{455,64},{165,130},{388,300},{120,300},{260,52}};
+  for (auto& p : sp) tft.drawPixel(p[0], p[1], MADD_TEXT);
+  // your spectrum waves along the bottom
+  for (int w = 0; w < 3; w++) {
+    uint16_t c = MADD_SPECTRUM[w == 0 ? 0 : (w == 1 ? 2 : 5)];
+    int base = 302 + w * 6, px = 0, py = base;
+    for (int x = 8; x <= 480; x += 8) {
+      int yy = base + (int)(5.0f * sinf((x + w * 40) * 0.02f));
+      tft.drawLine(px, py, x, yy, c);
+      px = x; py = yy;
+    }
+  }
+}
+
+// Panel with cut corners - the "lab instrument" shape.
+void drawChamfer(Rect r, uint16_t fill, uint16_t edge, int c = 10) {
+  tft.fillRect(r.x + c, r.y, r.w - 2 * c, r.h, fill);
+  tft.fillRect(r.x, r.y + c, c, r.h - 2 * c, fill);
+  tft.fillRect(r.x + r.w - c, r.y + c, c, r.h - 2 * c, fill);
+  tft.fillTriangle(r.x, r.y + c, r.x + c, r.y, r.x + c, r.y + c, fill);
+  tft.fillTriangle(r.x + r.w - 1, r.y + c, r.x + r.w - 1 - c, r.y, r.x + r.w - 1 - c, r.y + c, fill);
+  tft.fillTriangle(r.x, r.y + r.h - 1 - c, r.x + c, r.y + r.h - 1, r.x + c, r.y + r.h - 1 - c, fill);
+  tft.fillTriangle(r.x + r.w - 1, r.y + r.h - 1 - c, r.x + r.w - 1 - c, r.y + r.h - 1, r.x + r.w - 1 - c, r.y + r.h - 1 - c, fill);
+  int x0 = r.x, y0 = r.y, x1 = r.x + r.w - 1, y1 = r.y + r.h - 1;
+  tft.drawLine(x0 + c, y0, x1 - c, y0, edge);
+  tft.drawLine(x1 - c, y0, x1, y0 + c, edge);
+  tft.drawLine(x1, y0 + c, x1, y1 - c, edge);
+  tft.drawLine(x1, y1 - c, x1 - c, y1, edge);
+  tft.drawLine(x1 - c, y1, x0 + c, y1, edge);
+  tft.drawLine(x0 + c, y1, x0, y1 - c, edge);
+  tft.drawLine(x0, y1 - c, x0, y0 + c, edge);
+  tft.drawLine(x0, y0 + c, x0 + c, y0, edge);
+}
+
+void drawChamferButton(Rect r, const char* label, uint16_t fill, uint16_t edge, uint16_t textColor, const GFXfont* font = nullptr) {
+  drawChamfer(r, fill, edge, r.h >= 40 ? 10 : 7);
+  if (!font) font = FONT_SM;
+  tft.setFreeFont(font);
+  tft.setTextColor(textColor, fill);
+  tft.setTextDatum(MC_DATUM);
+  char buf[40];
+  strncpy(buf, label, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+  while (strlen(buf) > 1 && tft.textWidth(buf) > r.w - 14) buf[strlen(buf) - 1] = 0; // never spill past the edge
+  tft.drawString(buf, r.x + r.w / 2, r.y + r.h / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Pointy-top hexagon, filled, with a double neon outline.
+void drawHex(int cx, int cy, int r, uint16_t fill, uint16_t edge) {
+  int px[6], py[6];
+  for (int i = 0; i < 6; i++) {
+    float a = (60.0f * i - 90.0f) * 0.0174533f;
+    px[i] = cx + (int)(r * cosf(a));
+    py[i] = cy + (int)(r * sinf(a));
+  }
+  for (int i = 0; i < 6; i++) tft.fillTriangle(cx, cy, px[i], py[i], px[(i + 1) % 6], py[(i + 1) % 6], fill);
+  for (int i = 0; i < 6; i++) {
+    tft.drawLine(px[i], py[i], px[(i + 1) % 6], py[(i + 1) % 6], edge);
+    int j = (i + 1) % 6;
+    tft.drawLine(px[i] + (cx - px[i]) / 30, py[i] + (cy - py[i]) / 30, px[j] + (cx - px[j]) / 30, py[j] + (cy - py[j]) / 30, edge);
+  }
+}
+
+// The MADD badge: neon hexagon holding your color bands.
+void drawHexBadge(int cx, int cy, int r) {
+  drawHex(cx, cy, r, MADD_PANEL, MADD_MAGENTA);
+  int bw = r, bh = (r * 3 / 2) / 4;
+  for (int i = 0; i < 4; i++) {
+    tft.fillRect(cx - bw / 2, cy - (bh * 2) + i * bh + 1, bw, bh - 1, MADD_SPECTRUM[i == 0 ? 0 : (i == 1 ? 2 : (i == 2 ? 4 : 5))]);
+  }
+}
+
+void drawSpectrumStripe(int y) {
+  for (int i = 0; i < 6; i++) tft.fillRect(i * 80, y, 80, 3, MADD_SPECTRUM[i]);
+}
+
+// Short status for the top-right corner of the Home and Session screens.
+void topStatusText(char* buf, size_t len) {
+  if (!audioUsingBluetooth()) { snprintf(buf, len, "Speaker"); return; }
+  switch (audio_btStatus()) {
+    case BT_STATUS_CONNECTED:    snprintf(buf, len, "BT connected"); break;
+    case BT_STATUS_CONNECTING:   snprintf(buf, len, "BT connecting..."); break;
+    case BT_STATUS_NOT_FOUND:    snprintf(buf, len, "BT not found"); break;
+    case BT_STATUS_RECONNECTING: snprintf(buf, len, "BT reconnecting..."); break;
+    default:                     snprintf(buf, len, "BT searching..."); break;
+  }
+}
+
+char lastTopStatus[24] = "";
+void drawTopStatus(bool force) {
+  char buf[24];
+  topStatusText(buf, sizeof(buf));
+  if (!force && strcmp(buf, lastTopStatus) == 0) return;
+  strcpy(lastTopStatus, buf);
+  fillAurora(300, 6, 164, 24);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(audioUsingBluetooth() ? btStatusColor() : MADD_DIM);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(buf, 460, 12);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Top bar: badge + title on the left, live status on the right, spectrum stripe under it.
+void drawTopBar(const char* title, bool showBack) {
+  drawHexBadge(34, 20, 14);
+  char t[40];
+  snprintf(t, sizeof(t), showBack ? "< %s" : "%s", title);
+  tft.setFreeFont(FONT_LG);
+  const GFXfont* f = (tft.textWidth(t) <= 240) ? FONT_LG : FONT_SM;
+  drawFittedText(56, f == FONT_LG ? 8 : 12, 240, t, f, MADD_TEXT, MADD_PANEL);
+  drawTopStatus(true);
+  drawSpectrumStripe(38);
 }
 
 
@@ -1681,8 +1878,9 @@ void drawBtScanScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Bluetooth Device", 20, 14);
+  tft.drawString("Bluetooth Device", 20, 12);
   drawHomeButton();
+  drawBtStatusLine(20, 38, 330);
 
   bool scanning = audio_btIsScanning();
   const char* scanLabel = scanning ? "Scanning... (tap to stop)"
@@ -1777,23 +1975,24 @@ void handleBtScanTouch(int x, int y) {
   int shown = count < 6 ? count : 6;
   for (int i = 0; i < shown; i++) {
     if (touchInRect(x, y, btScanResultRects[i])) {
-      audio_btStopScan();
       strncpy(btDeviceName, audio_btScanResultName(i), sizeof(btDeviceName) - 1);
       btDeviceName[sizeof(btDeviceName) - 1] = 0;
       audioOutputPref = AUDIO_OUT_BLUETOOTH; // picking a device means "use Bluetooth"
       saveSetupInfo();
-      audio_btEnd(); // clean BT teardown; it reconnects to the chosen device after restart
-      // The actual connection only happens cleanly on a fresh boot - see
-      // the comment in btaudio_connectToScanResult(). Show a brief message
-      // so this doesn't look like a freeze right before it restarts.
-      tft.fillScreen(COLOR_BG);
-      tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawString("Saved - restarting...", 240, 160);
-      delay(800); // trimmed from 1200ms - still readable, shaves a little off the total wait
-      ESP.restart();
+      // Connect right now - no restart. The status line above the list
+      // shows Connecting... then Connected.
+      audio_setBtDeviceName(btDeviceName);
+      audio_setOutput(AUDIO_OUT_BLUETOOTH);
+      audio_btConnectToScanResult(i);
+      scanRequested = false;
+      screen = SCR_BT_SCAN;
+      return;
     }
+  }
+  // Tapping the status line when a device wasn't found retries right away.
+  if (audioUsingBluetooth() && y >= 36 && y < 54 && audio_btStatus() == BT_STATUS_NOT_FOUND) {
+    audio_btRetry();
+    screen = SCR_BT_SCAN;
   }
 }
 
@@ -2068,10 +2267,6 @@ void handleUpdateTouch(int x, int y) {
 // Screen: category picker
 // ---------------------------------------------------------------------
 Rect catButtonRects[CATEGORY_COUNT];
-Rect btnFavorites = {20, 50, 220, 42};
-Rect btnSettings = {260, 50, 200, 42};
-Rect btnCustomFreq   = {20, 258, 220, 42};
-Rect btnSequences    = {260, 258, 200, 42};
 bool viewingFavorites = false;
 // pendingSequenceIndex declared earlier (near the other mode flags) - see note there.
 
@@ -2089,61 +2284,113 @@ void buildFavoritesIndex() {
   }
 }
 
-Rect titleTapZone = {140, 0, 200, 40}; // widened - same lesson as the checkbox fix: small tap targets read as "doesn't work"
+Rect titleTapZone = {50, 0, 230, 36}; // tap the title 5 times for the hidden stats panel
 int titleTapCount = 0;
 unsigned long titleTapWindowStart = 0;
 bool showDeviceStats = false;
 
+// ---------------------------------------------------------------------
+// Home screen: quick start, favorites, and nine color-coded tiles.
+// ---------------------------------------------------------------------
+Rect btnQuickStart = {18, 48, 290, 70};
+Rect btnFavorites  = {318, 48, 144, 70};
+
+enum HomeTile : uint8_t { TILE_CATEGORY, TILE_PROGRAMS, TILE_CUSTOM, TILE_SETTINGS };
+struct HomeTileDef { const char* label; HomeTile kind; Category cat; int colorIdx; };
+// colorIdx: 0 orange, 1 coral, 2 pink, 3 magenta, 4 violet, 5 blue, -1 cyan, -2 dim
+static const HomeTileDef HOME_TILES[9] = {
+  {"Sleep",    TILE_CATEGORY, CAT_HEART_CIRC,       5},
+  {"Focus",    TILE_CATEGORY, CAT_MENTAL_COGNITIVE, 4},
+  {"Wellness", TILE_CATEGORY, CAT_CHRONIC_SYSTEMIC, 2},
+  {"Athletic", TILE_CATEGORY, CAT_PAIN_RECOVERY,    0},
+  {"Body",     TILE_CATEGORY, CAT_BONE_JOINT,       1},
+  {"Skin",     TILE_CATEGORY, CAT_SKIN_WOUND,       3},
+  {"Programs", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
+  {"Custom",   TILE_CUSTOM,   CAT_BONE_JOINT,      -2},
+  {"Settings", TILE_SETTINGS, CAT_BONE_JOINT,      -2},
+};
+Rect homeTileRects[9];
+
+uint16_t tileColor(int idx) {
+  if (idx >= 0) return MADD_SPECTRUM[idx];
+  return idx == -1 ? MADD_CYAN : MADD_DIM;
+}
+
+// Quick start = the last preset used (from the session log), or Deep Relaxation.
+int quickStartPresetIndex() {
+  if (logCount > 0) {
+    for (int i = 0; i < NUM_BASE_PRESETS; i++)
+      if (strcmp(BASE_PRESETS[i].name, sessionLog[0].name) == 0) return i;
+  }
+  for (int i = 0; i < NUM_BASE_PRESETS; i++)
+    if (BASE_PRESETS[i].category == CAT_HEART_CIRC) return i;
+  return 0;
+}
+
+void openPresetByIndex(int realIdx, Screen origin) {
+  selectedIndex = realIdx;
+  selName = BASE_PRESETS[realIdx].name;
+  selFreq = BASE_PRESETS[realIdx].freqHz;
+  selWave = BASE_PRESETS[realIdx].wave;
+  selCategoryName = CATEGORY_NAMES[BASE_PRESETS[realIdx].category];
+  pendingSequenceIndex = -1;
+  runScreenOrigin = origin;
+  screen = isWellnessCenter ? SCR_CLIENT_CONFIRM : SCR_RUN;
+}
+
+void drawCoilIcon(int cx, int topY, bool bright) {
+  uint16_t a = bright ? MADD_CYAN : MADD_EDGE, b = bright ? MADD_COIL2 : MADD_EDGE;
+  tft.drawEllipse(cx, topY,      10, 3, a);
+  tft.drawEllipse(cx, topY + 10, 15, 4, b);
+  tft.drawEllipse(cx, topY + 21, 20, 5, a);
+  tft.drawEllipse(cx, topY + 33, 25, 6, b);
+}
+
 void drawCategoryScreen() {
-  // Same splash-background treatment as the Welcome screen - falls back
-  // to the plain solid color if there's no SD card. This screen's own
-  // buttons already have their own solid panel fills (readable either
-  // way); only the plain title text needs its own backing strip.
-  drawSplashBackground();
-  tft.fillRect(0, 0, 480, 36, COLOR_BG);
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TC_DATUM);
-  tft.drawString("MADD PEMF", 240, 8);
-  tft.setTextDatum(TL_DATUM);
+  drawAuroraBackground();
+  drawTopBar("MADD PEMF", false);
 
-  drawButtonFast(btnFavorites, "* Favorites", COLOR_MUTED);
-  drawButton(btnSettings, "Settings", COLOR_MUTED);
+  // Quick start card
+  drawChamfer(btnQuickStart, MADD_PANEL, MADD_MAGENTA);
+  drawCoilIcon(58, 60, true);
+  int q = quickStartPresetIndex();
+  drawFittedText(96, 58, 200, "Quick start", FONT_LG, MADD_TEXT, MADD_PANEL);
+  char f[16], line[48];
+  formatFreq(BASE_PRESETS[q].freqHz, f, sizeof(f));
+  snprintf(line, sizeof(line), "%s  %s", BASE_PRESETS[q].name, f);
+  drawFittedText(96, 90, 200, line, FONT_SM, MADD_CYAN, MADD_PANEL);
 
-  int colW = 220, rowH = 44, gapX = 20, gapY = 8;
-  for (int i = 0; i < CATEGORY_COUNT; i++) {
-    int col = i % 2, row = i / 2;
-    Rect r = {20 + col * (colW + gapX), 100 + row * (rowH + gapY), colW, rowH};
-    catButtonRects[i] = r;
-    drawButtonFast(r, CATEGORY_NAMES[i]);
+  drawChamfer(btnFavorites, MADD_PANEL, MADD_EDGE);
+  drawFittedText(btnFavorites.x + 22, btnFavorites.y + 24, 110, "Favorites", FONT_LG, MADD_TEXT, MADD_PANEL);
+
+  // 3 x 3 tiles, each with its own color edge
+  for (int i = 0; i < 9; i++) {
+    int col = i % 3, row = i / 3;
+    Rect r = {18 + col * 150, 126 + row * 56, 144, 50};
+    homeTileRects[i] = r;
+    drawChamfer(r, MADD_PANEL, MADD_EDGE, 8);
+    tft.fillRect(r.x, r.y + 8, 4, r.h - 16, tileColor(HOME_TILES[i].colorIdx));
+    drawFittedText(r.x + 16, r.y + 15, r.w - 24, HOME_TILES[i].label, FONT_LG, MADD_TEXT, MADD_PANEL);
   }
 
-  drawButtonFast(btnCustomFreq, "Custom Freq", COLOR_MUTED);
-  drawButton(btnSequences, "Harmonics", COLOR_MUTED);
-
   if (showDeviceStats) {
-    int px = 60, py = 70, pw = 360, ph = 180;
-    int radius = 24;
-    tft.fillRoundRect(px, py, pw, ph, radius, COLOR_PANEL_LIT);
-    tft.drawRoundRect(px, py, pw, ph, radius, COLOR_ACCENT);
+    Rect p = {60, 70, 360, 180};
+    drawChamfer(p, MADD_PANEL, MADD_MAGENTA, 14);
     tft.setFreeFont(FONT_LG);
-    tft.setTextColor(TFT_WHITE, COLOR_PANEL_LIT);
+    tft.setTextColor(MADD_TEXT);
     tft.setTextDatum(TC_DATUM);
-    tft.drawString("You found it!", 240, py + 16);
+    tft.drawString("You found it!", 240, p.y + 16);
     tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_PANEL_LIT);
+    tft.setTextColor(MADD_DIM);
     char buf[48];
     snprintf(buf, sizeof(buf), "%lu sessions run, all-time", lifetimeSessionCount);
-    tft.drawString(buf, 240, py + 56);
-    unsigned long hrs = lifetimeMinutes / 60;
-    snprintf(buf, sizeof(buf), "%lu hours, %lu minutes of therapy delivered", hrs, lifetimeMinutes % 60);
-    tft.drawString(buf, 240, py + 78);
-    unsigned long upHrs = millis() / 3600000UL;
-    unsigned long upMin = (millis() / 60000UL) % 60;
-    snprintf(buf, sizeof(buf), "Up for %luh %lum since last power-on", upHrs, upMin);
-    tft.drawString(buf, 240, py + 100);
-    tft.setTextColor(COLOR_ACCENT, COLOR_PANEL_LIT);
-    tft.drawString("Tap anywhere to close", 240, py + 140);
+    tft.drawString(buf, 240, p.y + 56);
+    snprintf(buf, sizeof(buf), "%lu h %lu min of session time", lifetimeMinutes / 60, lifetimeMinutes % 60);
+    tft.drawString(buf, 240, p.y + 78);
+    snprintf(buf, sizeof(buf), "Up %luh %lum since power-on", millis() / 3600000UL, (millis() / 60000UL) % 60);
+    tft.drawString(buf, 240, p.y + 100);
+    tft.setTextColor(MADD_CYAN);
+    tft.drawString("Tap anywhere to close", 240, p.y + 140);
     tft.setTextDatum(TL_DATUM);
   }
 }
@@ -2151,7 +2398,6 @@ void drawCategoryScreen() {
 void handleCategoryTouch(int x, int y) {
   if (showDeviceStats) {
     showDeviceStats = false; // tap anywhere to dismiss
-    screen = SCR_CATEGORY;
     return;
   }
   if (touchInRect(x, y, titleTapZone)) {
@@ -2162,7 +2408,10 @@ void handleCategoryTouch(int x, int y) {
       titleTapCount = 0;
       showDeviceStats = true;
     }
-    screen = SCR_CATEGORY;
+    return;
+  }
+  if (touchInRect(x, y, btnQuickStart)) {
+    openPresetByIndex(quickStartPresetIndex(), SCR_CATEGORY);
     return;
   }
   if (touchInRect(x, y, btnFavorites)) {
@@ -2172,27 +2421,21 @@ void handleCategoryTouch(int x, int y) {
     screen = SCR_LIST;
     return;
   }
-  if (touchInRect(x, y, btnSettings)) {
-    screen = SCR_SETTINGS;
-    return;
-  }
-  if (touchInRect(x, y, btnCustomFreq)) {
-    screen = SCR_CUSTOM_FREQ;
-    return;
-  }
-  if (touchInRect(x, y, btnSequences)) {
-    screen = SCR_SEQUENCES;
-    return;
-  }
-  for (int i = 0; i < CATEGORY_COUNT; i++) {
-    if (touchInRect(x, y, catButtonRects[i])) {
-      viewingFavorites = false;
-      currentCategory = (Category)i;
-      buildCategoryIndex(currentCategory);
-      listPage = 0;
-      screen = SCR_LIST;
-      return;
+  for (int i = 0; i < 9; i++) {
+    if (!touchInRect(x, y, homeTileRects[i])) continue;
+    switch (HOME_TILES[i].kind) {
+      case TILE_CATEGORY:
+        viewingFavorites = false;
+        currentCategory = HOME_TILES[i].cat;
+        buildCategoryIndex(currentCategory);
+        listPage = 0;
+        screen = SCR_LIST;
+        break;
+      case TILE_PROGRAMS: screen = SCR_SEQUENCES; break;
+      case TILE_CUSTOM:   screen = SCR_CUSTOM_FREQ; break;
+      case TILE_SETTINGS: screen = SCR_SETTINGS; break;
     }
+    return;
   }
 }
 
@@ -2228,7 +2471,7 @@ void drawSequencesScreen() {
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Harmonics", 20, 12);
+  tft.drawString("Programs", 20, 12);
   drawHomeButton();
 
   int totalSeqPages = (NUM_SEQUENCES + SEQUENCES_PER_PAGE - 1) / SEQUENCES_PER_PAGE;
@@ -2304,7 +2547,7 @@ void handleSequencesTouch(int x, int y) {
       selName = p.name;
       selFreq = p.steps[0].freqHz;
       selWave = p.steps[0].wave;
-      selCategoryName = "Harmonics";
+      selCategoryName = "Programs";
       selectedIndex = -1;
       pendingSequenceIndex = idx;
       runScreenOrigin = SCR_SEQUENCES;
@@ -2532,18 +2775,24 @@ void handleListTouch(int x, int y) {
 //   Left column : name, frequency, Start/Pause, Sound, Pick Sound, Stop & Back
 //   Right column: Power, Session timer, Volume, sound-output status
 // ---------------------------------------------------------------------
-Rect btnStartStop     = {20, 100, 220, 44};
-Rect btnFavToggle     = {145, 28, 95, 36};
-// Sound picker: three side-by-side choices, the active one lit up.
-Rect btnSndOff        = {20, 152, 62, 44};
-Rect btnSndTone       = {86, 152, 72, 44};
-Rect btnSndScape      = {162, 152, 78, 44};
-Rect btnPickSound     = {20, 204, 220, 44};
-Rect btnBackFromRun   = {20, 256, 220, 44};
-
-Stepper powerStepper  = {"Power",  260, 80, 10, 1, 100, 1, formatPercentValue};
-Stepper timerStepper  = {"Session timer", 260, 148, 30, 0, 60, 5, formatTimerValue};
-Stepper volumeStepper = {"Volume", 260, 216, 60, 0, 100, 5, formatPercentValue};
+// Left: coil rings + hexagon countdown, then Start/Pause, Stop, Favorite.
+Rect btnRunTitle      = {18, 0, 280, 36};     // "< Name" in the top bar = stop and go back
+Rect btnStartStop     = {18, 258, 96, 40};
+Rect btnBackFromRun   = {120, 258, 66, 40};   // Stop
+Rect btnFavToggle     = {192, 258, 32, 40};
+// Right panel: sound choice, power, volume, timer, status.
+Rect runPanel         = {230, 46, 234, 254};
+Rect btnSndOff        = {240, 70, 62, 34};
+Rect btnSndTone       = {308, 70, 68, 34};
+Rect btnSndScape      = {382, 70, 74, 34};
+Rect btnPickSound     = {240, 108, 216, 22};
+Rect btnPwrMinus      = {240, 136, 48, 34};
+Rect btnPwrPlus       = {408, 136, 48, 34};
+Rect btnVolMinus      = {240, 194, 48, 34};
+Rect btnVolPlus       = {408, 194, 48, 34};
+Rect btnTmrMinus      = {240, 234, 48, 34};
+Rect btnTmrPlus       = {408, 234, 48, 34};
+static const int RUN_HEX_X = 112, RUN_HEX_Y = 142, RUN_HEX_R = 58;
 
 unsigned long sessionStartMillis = 0;
 bool sessionTimerArmed = false;
@@ -2683,7 +2932,7 @@ void outputStatusText(char* buf, size_t len) {
       lastFrames = fr;
       lastCheck = millis();
     }
-    if (!audio_btIsConnected()) snprintf(buf, len, "BT: connecting...");
+    if (!audio_btIsConnected()) btStatusText(buf, len);
     else if (!flowing) snprintf(buf, len, "BT: connected, no data");
     else if (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() == 0) snprintf(buf, len, "BT: streaming (silent)");
     else snprintf(buf, len, "BT: streaming");
@@ -2698,93 +2947,130 @@ char lastCountdownText[24] = "";
 char lastFreqText[32] = "";
 char lastStatusText[32] = "";
 
+// Tesla-coil rings above and below the hexagon; they pulse with the session.
+void drawRunCoils(bool bright) {
+  uint16_t a = bright ? MADD_CYAN : MADD_EDGE, b = bright ? MADD_COIL2 : tft.color565(44, 36, 86);
+  tft.drawEllipse(RUN_HEX_X, 66, 26, 5, a);
+  tft.drawEllipse(RUN_HEX_X, 214, 84, 13, a);
+  tft.drawEllipse(RUN_HEX_X, 233, 96, 15, b);
+}
+
+void drawRunHexContents(const char* timeText, const char* freqText) {
+  drawHex(RUN_HEX_X, RUN_HEX_Y, RUN_HEX_R, MADD_PANEL, MADD_MAGENTA);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG);
+  tft.setTextColor(MADD_TEXT);
+  tft.drawString(timeText, RUN_HEX_X, RUN_HEX_Y - 10);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(MADD_CYAN);
+  tft.drawString(freqText, RUN_HEX_X, RUN_HEX_Y + 18);
+  tft.setTextDatum(TL_DATUM);
+}
+
 void drawCountdownOnly() {
-  char timeBuf[24] = "";
+  char timeBuf[24];
   if (sessionTimerArmed && (waveform_isRunning() || sessionPaused)) {
     unsigned long elapsedSec = (sessionEffectiveMillis() - sessionStartMillis) / 1000UL;
     long remainingSec = (long)timerMinutes * 60 - (long)elapsedSec;
     if (remainingSec < 0) remainingSec = 0;
-    snprintf(timeBuf, sizeof(timeBuf), sessionPaused ? "Paused: %ld:%02ld" : "Time left: %ld:%02ld",
-             remainingSec / 60, remainingSec % 60);
+    snprintf(timeBuf, sizeof(timeBuf), "%ld:%02ld", remainingSec / 60, remainingSec % 60);
   } else if (sessionPaused) {
     snprintf(timeBuf, sizeof(timeBuf), "Paused");
-  }
-  if (strcmp(timeBuf, lastCountdownText) != 0) {
-    tft.fillRect(258, 262, 212, 24, COLOR_BG);
-    drawFittedText(260, 266, 210, timeBuf, FONT_SM, COLOR_ACCENT, COLOR_BG);
-    strcpy(lastCountdownText, timeBuf);
+  } else if (waveform_isRunning()) {
+    snprintf(timeBuf, sizeof(timeBuf), "On");       // timer set to Off - runs until stopped
+  } else {
+    if (timerMinutes > 0) snprintf(timeBuf, sizeof(timeBuf), "%d:00", timerMinutes);
+    else snprintf(timeBuf, sizeof(timeBuf), "Ready");
   }
 
   char freqBuf[32], f[16];
   formatFreq(liveFrequency(), f, sizeof(f));
-  if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%s (%d/%d)", f, programStepIndex + 1, currentProgram.stepCount);
+  if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%s  %d/%d", f, programStepIndex + 1, currentProgram.stepCount);
   else snprintf(freqBuf, sizeof(freqBuf), "%s", f);
-  if (strcmp(freqBuf, lastFreqText) != 0) {
-    tft.fillRect(18, 38, 124, 30, COLOR_BG);
-    drawFittedText(20, 42, 122, freqBuf, FONT_LG, TFT_WHITE, COLOR_BG);
+
+  if (strcmp(timeBuf, lastCountdownText) != 0 || strcmp(freqBuf, lastFreqText) != 0) {
+    drawRunHexContents(timeBuf, freqBuf);
+    strcpy(lastCountdownText, timeBuf);
     strcpy(lastFreqText, freqBuf);
   }
 
   char status[32];
   outputStatusText(status, sizeof(status));
   if (strcmp(status, lastStatusText) != 0) {
-    tft.fillRect(258, 288, 212, 24, COLOR_BG);
-    drawFittedText(260, 292, 210, status, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+    tft.fillRect(240, 276, 218, 18, MADD_PANEL);
+    drawFittedText(240, 278, 216, status, FONT_SM, audioUsingBluetooth() ? btStatusColor() : MADD_DIM, MADD_PANEL);
     strcpy(lastStatusText, status);
   }
+  drawTopStatus(false);
 }
 
 void drawRunScreen() {
   prepareSessionAudioIfNew();
-  drawSplashBackground();
-  drawHomeButton();
-
-  // Dark panels behind the text areas keep everything readable while the
-  // splash still shows around them. (Free fonts don't paint their own
-  // background, so text straight over the image is hard to read.)
-  tft.fillRoundRect(10, 6, 244, 92, 12, COLOR_BG);    // title / frequency / category
-  tft.fillRoundRect(250, 52, 222, 262, 12, COLOR_BG); // steppers + status
-  drawHomeButton();
-
-  tft.setFreeFont(FONT_LG);
-  const GFXfont* titleFont = (tft.textWidth(selName) <= 120) ? FONT_LG : FONT_SM;
-  drawFittedText(20, 12, 120, selName, titleFont, TFT_WHITE, COLOR_BG);
-
-  char buf[48];
-  snprintf(buf, sizeof(buf), "%s - %s", selWave == WAVE_SQUARE ? "Square" : "Sine", selCategoryName);
-  drawFittedText(20, 72, 225, buf, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+  drawAuroraBackground();
+  drawTopBar(selName, true);
+  drawRunCoils(true);
+  drawChamfer(runPanel, MADD_PANEL, MADD_EDGE, 12);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(MADD_DIM);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("Sound", 240, 52);
 
   // force the once-a-second pieces to repaint on this fresh screen
-  strcpy(lastCountdownText, "\x01");
+  lastCountdownText[0] = 0;
   lastFreqText[0] = 0;
   lastStatusText[0] = 0;
   refreshRunControls();
 }
 
+// One "-  Label value  +" row inside the right panel.
+void drawValueRow(Rect minus, Rect plus, const char* text) {
+  drawChamferButton(minus, "-", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  drawChamferButton(plus,  "+", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  int x = minus.x + minus.w + 4, w = plus.x - x - 4;
+  tft.fillRect(x, minus.y, w, minus.h, MADD_PANEL);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(MADD_TEXT);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(text, x + w / 2, minus.y + minus.h / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Power meter that fills through your spectrum colors.
+void drawPowerMeter() {
+  int lit = (powerDisplay + 9) / 10; // 1-10 segments
+  for (int i = 0; i < 10; i++) {
+    uint16_t c = (i < lit) ? MADD_SPECTRUM[i * 6 / 10] : tft.color565(42, 26, 64);
+    tft.fillRect(240 + i * 22, 174, 20, 12, c);
+  }
+}
+
 // Everything that can change from a tap while staying on the Run screen.
 void refreshRunControls() {
-  bool isFav = (selectedIndex >= 0) && favoriteBits[selectedIndex];
-  if (selectedIndex >= 0) drawButtonFast(btnFavToggle, isFav ? "* ON" : "* Fav", isFav ? COLOR_WARN : COLOR_MUTED);
-
   bool running = waveform_isRunning();
-  const char* startLabel = sessionPaused ? "RESUME"
-                          : running ? "PAUSE"
-                          : (pendingSequenceIndex >= 0 ? "START Sequence" : "START");
-  uint16_t startColor = sessionPaused ? COLOR_GOOD : running ? COLOR_WARN : COLOR_GOOD;
-  drawButton(btnStartStop, startLabel, startColor);
+  if (sessionPaused)      drawChamferButton(btnStartStop, "Resume", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
+  else if (running)       drawChamferButton(btnStartStop, "Pause", tft.color565(90, 54, 6), MADD_SPECTRUM[0], MADD_TEXT, FONT_LG);
+  else                    drawChamferButton(btnStartStop, "Start", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
+  drawChamferButton(btnBackFromRun, "Stop", tft.color565(58, 13, 26), MADD_SPECTRUM[2], MADD_TEXT);
+  bool isFav = (selectedIndex >= 0) && favoriteBits[selectedIndex];
+  if (selectedIndex >= 0) {
+    drawChamferButton(btnFavToggle, "*", isFav ? tft.color565(90, 54, 6) : MADD_PANEL, isFav ? MADD_SPECTRUM[0] : MADD_EDGE, MADD_TEXT, FONT_LG);
+  }
 
+  // Sound choice - the lit one is what's playing
   bool haveScapes = sdmedia_soundscapeCount() > 0;
-  drawButtonFast(btnSndOff,   "Off",  sessionSoundMode == AUDIO_SRC_OFF ? COLOR_PANEL_LIT : COLOR_PANEL, sessionSoundMode == AUDIO_SRC_OFF);
-  drawButtonFast(btnSndTone,  "Tone", sessionSoundMode == AUDIO_SRC_TONE ? COLOR_GOOD : COLOR_PANEL, sessionSoundMode == AUDIO_SRC_TONE);
-  drawButtonFast(btnSndScape, "Nature", !haveScapes ? COLOR_MUTED : sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? COLOR_GOOD : COLOR_PANEL,
-                 sessionSoundMode == AUDIO_SRC_SOUNDSCAPE);
+  uint16_t onFill = tft.color565(12, 58, 68);
+  drawChamferButton(btnSndOff, "Off", sessionSoundMode == AUDIO_SRC_OFF ? tft.color565(40, 30, 64) : MADD_PANEL,
+                    sessionSoundMode == AUDIO_SRC_OFF ? MADD_DIM : MADD_EDGE, MADD_TEXT);
+  drawChamferButton(btnSndTone, "Tone", sessionSoundMode == AUDIO_SRC_TONE ? onFill : MADD_PANEL,
+                    sessionSoundMode == AUDIO_SRC_TONE ? MADD_CYAN : MADD_EDGE, MADD_TEXT);
+  drawChamferButton(btnSndScape, "Nature", sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? onFill : MADD_PANEL,
+                    sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? MADD_CYAN : MADD_EDGE, haveScapes ? MADD_TEXT : MADD_EDGE);
 
-  // Second row names what is actually playing, and is the way to change it.
   char nowBuf[40];
   if (sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && sessionSoundscapeIndex >= 0) {
     char name[24];
     prettySoundName(sessionSoundscapeIndex, name, sizeof(name));
-    snprintf(nowBuf, sizeof(nowBuf), "%s  - change", name);
+    snprintf(nowBuf, sizeof(nowBuf), "%s  (tap to change)", name);
   } else if (sessionSoundMode == AUDIO_SRC_TONE) {
     char f[16];
     formatFreq(liveFrequency(), f, sizeof(f));
@@ -2792,20 +3078,37 @@ void refreshRunControls() {
   } else {
     snprintf(nowBuf, sizeof(nowBuf), "Sound off");
   }
-  bool pickable = haveScapes && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE;
-  drawButtonFast(btnPickSound, nowBuf, pickable ? COLOR_PANEL_LIT : COLOR_BG, pickable);
-  drawButton(btnBackFromRun, "Stop & Back", COLOR_MUTED);
+  tft.fillRect(btnPickSound.x, btnPickSound.y, btnPickSound.w, btnPickSound.h, MADD_PANEL);
+  drawFittedText(btnPickSound.x, btnPickSound.y + 4, btnPickSound.w, nowBuf, FONT_SM, MADD_CYAN, MADD_PANEL);
 
-  powerStepper.value = powerDisplay;
-  timerStepper.value = timerMinutes;
-  volumeStepper.value = volumePercent;
-  volumeStepper.label = audioUsingBluetooth() ? "BT Volume" : "Speaker Volume";
-  tft.fillRect(258, volumeStepper.y - 24, 212, 20, COLOR_BG); // label length changes between modes
-  drawStepper(powerStepper);
-  drawStepper(timerStepper);
-  drawStepper(volumeStepper);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "Power %d%%", powerDisplay);
+  drawValueRow(btnPwrMinus, btnPwrPlus, buf);
+  drawPowerMeter();
+  snprintf(buf, sizeof(buf), "%s %d%%", audioUsingBluetooth() ? "BT vol" : "Volume", volumePercent);
+  drawValueRow(btnVolMinus, btnVolPlus, buf);
+  if (timerMinutes > 0) snprintf(buf, sizeof(buf), "Timer %d min", timerMinutes);
+  else snprintf(buf, sizeof(buf), "Timer off");
+  drawValueRow(btnTmrMinus, btnTmrPlus, buf);
 
   drawCountdownOnly();
+}
+
+// Pulses the coil rings in step with the session (visible up to ~4 Hz).
+void updateRunPulse() {
+  static bool lastBright = true;
+  bool bright = true;
+  if (waveform_isRunning()) {
+    float hz = liveFrequency();
+    if (hz > 4.0f) hz = 4.0f;
+    if (hz < 0.5f) hz = 0.5f;
+    unsigned long period = (unsigned long)(1000.0f / hz);
+    bright = (millis() % period) < period / 2;
+  }
+  if (bright != lastBright) {
+    drawRunCoils(bright);
+    lastBright = bright;
+  }
 }
 
 void endSession() {
@@ -2819,43 +3122,41 @@ void endSession() {
   sessionPaused = false;
 }
 
-// Off -> Tone -> Soundscape (if the card has any) -> Off ...
-void cycleSoundMode() {
-  if (sessionSoundMode == AUDIO_SRC_OFF) sessionSoundMode = AUDIO_SRC_TONE;
-  else if (sessionSoundMode == AUDIO_SRC_TONE && sdmedia_soundscapeCount() > 0) {
-    sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
-    if (sessionSoundscapeIndex < 0) sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
-  }
-  else sessionSoundMode = AUDIO_SRC_OFF;
-  saveSetupInfo();
-}
-
 void handleRunTouch(int x, int y) {
-  if (handleHomeTouch(x, y)) {
+  if (touchInRect(x, y, btnRunTitle) || touchInRect(x, y, btnBackFromRun)) {
     endSession();
+    screen = runScreenOrigin;
     return;
   }
   if (selectedIndex >= 0 && touchInRect(x, y, btnFavToggle)) {
     setFavorite(selectedIndex, !favoriteBits[selectedIndex]);
     return;
   }
-  if (handleStepperTouch(powerStepper, x, y)) {
-    powerDisplay = powerStepper.value;
+  if (touchInRect(x, y, btnPwrMinus) || touchInRect(x, y, btnPwrPlus)) {
+    bool up = touchInRect(x, y, btnPwrPlus);
+    int step = (powerDisplay < 10 || (!up && powerDisplay <= 10)) ? 1 : 5;
+    powerDisplay += up ? step : -step;
+    if (powerDisplay < 1) powerDisplay = 1;
+    if (powerDisplay > 100) powerDisplay = 100;
     waveform_setIntensity(actualIntensityPercent());
     return;
   }
-  if (handleStepperTouch(timerStepper, x, y)) {
-    timerMinutes = timerStepper.value;
+  if (touchInRect(x, y, btnVolMinus) || touchInRect(x, y, btnVolPlus)) {
+    volumePercent += touchInRect(x, y, btnVolPlus) ? 5 : -5;
+    if (volumePercent < 0) volumePercent = 0;
+    if (volumePercent > 100) volumePercent = 100;
+    audio_setVolume((uint8_t)volumePercent);
+    saveSetupInfo();
+    return;
+  }
+  if (touchInRect(x, y, btnTmrMinus) || touchInRect(x, y, btnTmrPlus)) {
+    timerMinutes += touchInRect(x, y, btnTmrPlus) ? 5 : -5;
+    if (timerMinutes < 0) timerMinutes = 0;
+    if (timerMinutes > 60) timerMinutes = 60;
     if (waveform_isRunning()) {
       sessionStartMillis = millis();
       sessionTimerArmed = (timerMinutes > 0);
     }
-    return;
-  }
-  if (handleStepperTouch(volumeStepper, x, y)) {
-    volumePercent = volumeStepper.value;
-    audio_setVolume((uint8_t)volumePercent);
-    saveSetupInfo();
     return;
   }
   if (touchInRect(x, y, btnStartStop)) {
@@ -2896,9 +3197,9 @@ void handleRunTouch(int x, int y) {
     screen = SCR_SOUNDSCAPES; // the session keeps running while picking
     return;
   }
-  if (touchInRect(x, y, btnBackFromRun)) {
-    endSession();
-    screen = runScreenOrigin;
+  // Tapping the status line retries Bluetooth when it wasn't found.
+  if (audioUsingBluetooth() && x >= 240 && y >= 272 && y < 300 && audio_btStatus() == BT_STATUS_NOT_FOUND) {
+    audio_btRetry();
   }
 }
 
@@ -3219,6 +3520,8 @@ void loop() {
     refreshRunControls();
   }
 
+  if (screen == SCR_RUN) updateRunPulse();
+  if (screen == SCR_CATEGORY) { static unsigned long lastTopTick = 0; if (millis() - lastTopTick > 1000) { drawTopStatus(false); lastTopTick = millis(); } }
   // Once-a-second small updates on the Run screen (countdown, live
   // frequency, BT status) - each only repaints if its text changed.
   if (screen == SCR_RUN) {
@@ -3227,6 +3530,44 @@ void loop() {
       drawCountdownOnly();
       lastTick = millis();
     }
+  }
+
+  // Bluetooth pop-up: whenever Bluetooth connects or drops, show a short
+  // banner at the bottom of whatever screen is up, then tidy it away.
+  static uint32_t lastBtChanges = 0;
+  static unsigned long toastUntil = 0;
+  static BtStatus lastShownBt = BT_STATUS_OFF;
+  if (audioUsingBluetooth()) {
+    BtStatus st = audio_btStatus();
+    bool edge = (audio_btStatusChanges() != lastBtChanges) ||
+                (st == BT_STATUS_NOT_FOUND && lastShownBt != BT_STATUS_NOT_FOUND);
+    if (edge && (st == BT_STATUS_CONNECTED || st == BT_STATUS_RECONNECTING || st == BT_STATUS_NOT_FOUND) && st != lastShownBt) {
+      char msg[48];
+      if (st == BT_STATUS_CONNECTED) snprintf(msg, sizeof(msg), "Bluetooth connected: %s", btDeviceName);
+      else if (st == BT_STATUS_RECONNECTING) snprintf(msg, sizeof(msg), "Bluetooth dropped - reconnecting...");
+      else snprintf(msg, sizeof(msg), "%s not found. Is it on?", btDeviceName);
+      Rect t = {40, 258, 400, 40};
+      tft.fillRoundRect(t.x, t.y, t.w, t.h, 12, COLOR_PANEL);
+      tft.drawRoundRect(t.x, t.y, t.w, t.h, 12, st == BT_STATUS_CONNECTED ? COLOR_GOOD : COLOR_WARN);
+      tft.setFreeFont(FONT_SM);
+      tft.setTextColor(TFT_WHITE, COLOR_PANEL);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawString(msg, 240, t.y + t.h / 2);
+      tft.setTextDatum(TL_DATUM);
+      toastUntil = millis() + 2500;
+      lastShownBt = st;
+    }
+    lastBtChanges = audio_btStatusChanges();
+    if (st == BT_STATUS_SEARCHING || st == BT_STATUS_CONNECTING) lastShownBt = st;
+  }
+  if (toastUntil && millis() > toastUntil) {
+    toastUntil = 0;
+    fullRedrawRequested = true; // repaint the screen underneath the banner
+  }
+  // The Bluetooth screen's status line follows along live.
+  if (screen == SCR_BT_SCAN) {
+    static unsigned long lastBtLine = 0;
+    if (millis() - lastBtLine > 1000) { drawBtStatusLine(20, 38, 330); lastBtLine = millis(); }
   }
 
   // Live BT scan list - redraw only when something actually changed.

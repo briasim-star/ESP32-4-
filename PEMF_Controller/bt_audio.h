@@ -49,6 +49,20 @@ bool audio_isHeadphonesMode();
 void audio_setBtDeviceName(const char* name); // saved device to connect to
 const char* audio_btDeviceName();
 void audio_btConnect();                    // non-blocking; starts the A2DP stack toward the saved name
+
+// What the UI shows the person about Bluetooth.
+enum BtStatus : uint8_t {
+  BT_STATUS_OFF,          // Bluetooth not in use
+  BT_STATUS_SEARCHING,    // looking for the saved device
+  BT_STATUS_CONNECTING,   // found it, handshake in progress
+  BT_STATUS_CONNECTED,
+  BT_STATUS_RECONNECTING, // was connected, dropped, trying again
+  BT_STATUS_NOT_FOUND     // 45 s with no luck - still trying in the background
+};
+BtStatus audio_btStatus();
+uint32_t audio_btStatusChanges();          // increments on every connect/disconnect - lets the UI notice changes
+void audio_btRetry();                      // "tap to retry" - goes straight to the remembered device
+void audio_btConnectToScanResult(int idx); // connect to a device picked from the scan list (no restart)
 bool audio_btStarted();
 bool audio_btIsConnected();
 // Full teardown - call before ESP.restart(). releaseMemory=true also frees the

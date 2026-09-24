@@ -6,6 +6,8 @@
 #include <driver/dac.h>
 #include <driver/rtc_io.h>
 #include <SD.h>
+#include <Preferences.h>
+#include <esp_gap_bt_api.h>
 #include <math.h>
 
 // ============================================================================
@@ -388,12 +390,66 @@ static int32_t btDataCallback(Frame* data, int32_t len) {
   return len;
 }
 
+// ---- Connection tracking (for on-screen status) ----------------------------
+// The library reports each state change through this callback; the UI reads
+// audio_btStatus() to show Searching / Connecting / Connected / Not found.
+static volatile esp_a2d_connection_state_t btConnState = ESP_A2D_CONNECTION_STATE_DISCONNECTED;
+static volatile bool btEverConnected = false;
+static volatile uint32_t btStatusChanges = 0;
+static unsigned long btAttemptStartMs = 0;
+static bool btSavedAddrValid = false;
+static uint8_t btSavedAddr[6];
+static bool btQuickConnectDone = false;
+static const unsigned long BT_NOT_FOUND_MS = 45000;
+
+// The paired device's address is remembered, so later boots reconnect to it
+// directly (a couple of seconds) instead of searching for its name (slow).
+static void btLoadSavedAddr() {
+  Preferences p;
+  p.begin("btaddr", true);
+  String n = p.getString("name", "");
+  btSavedAddrValid = (n.length() > 0 && n == String(btName) && p.getBytes("addr", btSavedAddr, 6) == 6);
+  p.end();
+}
+static void btSaveAddr(const uint8_t* addr) {
+  memcpy(btSavedAddr, addr, 6);
+  btSavedAddrValid = true;
+  Preferences p;
+  p.begin("btaddr", false);
+  p.putString("name", btName);
+  p.putBytes("addr", btSavedAddr, 6);
+  p.end();
+}
+
+static void onBtConnectionState(esp_a2d_connection_state_t state, void*) {
+  btConnState = state;
+  btStatusChanges++;
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) btEverConnected = true;
+  if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) btAttemptStartMs = millis(); // library keeps retrying; restart the "not found" clock
+}
+
+// While connecting by name: accept the device whose name matches ours.
+static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) {
+  if (ssid && btName[0] && strcmp(ssid, btName) == 0) {
+    btSaveAddr(address);
+    return true;
+  }
+  return false;
+}
+
 static void btService() {
-  if (g_btStarted && !btVolumeSent && a2dp.is_connected()) {
+  if (!g_btStarted) return;
+  if (!btVolumeSent && a2dp.is_connected()) {
     a2dp.set_volume(100); // ~80% of the device's range; our own volume does the rest
     btVolumeSent = true;
   }
-  if (g_btStarted && !a2dp.is_connected()) btVolumeSent = false;
+  if (!a2dp.is_connected()) btVolumeSent = false;
+
+  // Fast path: shortly after starting, go straight to the remembered address.
+  if (!btQuickConnectDone && btSavedAddrValid && millis() - btAttemptStartMs > 1500) {
+    btQuickConnectDone = true;
+    if (!a2dp.is_connected()) a2dp.connect_to(btSavedAddr);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -469,10 +525,30 @@ const char* audio_btDeviceName() { return btName; }
 
 void audio_btConnect() {
   if (g_btStarted || btName[0] == 0) return;
+  btLoadSavedAddr();
+  a2dp.set_on_connection_state_changed(onBtConnectionState);
+  a2dp.set_ssid_callback(onSsidMatchSaved);
+  btAttemptStartMs = millis();
+  btQuickConnectDone = false;
   // Same call the earlier (working) firmware used for Bluetooth tone output.
   a2dp.start(btName, btDataCallback); // returns quickly; the connection completes in the background
   g_btStarted = true;
   btVolumeSent = false;
+}
+
+BtStatus audio_btStatus() {
+  if (!g_btStarted) return BT_STATUS_OFF;
+  if (btConnState == ESP_A2D_CONNECTION_STATE_CONNECTED) return BT_STATUS_CONNECTED;
+  if (btConnState == ESP_A2D_CONNECTION_STATE_CONNECTING) return BT_STATUS_CONNECTING;
+  if (millis() - btAttemptStartMs > BT_NOT_FOUND_MS) return BT_STATUS_NOT_FOUND;
+  return btEverConnected ? BT_STATUS_RECONNECTING : BT_STATUS_SEARCHING;
+}
+uint32_t audio_btStatusChanges() { return btStatusChanges; }
+
+void audio_btRetry() {
+  if (!g_btStarted || a2dp.is_connected()) return;
+  btAttemptStartMs = millis();
+  if (btSavedAddrValid) a2dp.connect_to(btSavedAddr);
 }
 bool audio_btStarted() { return g_btStarted; }
 bool audio_btIsConnected() { return g_btStarted && a2dp.is_connected(); }
@@ -486,6 +562,7 @@ void audio_btEnd(bool releaseMemory) {
 
 // ---- scan ----
 static char scanResults[BT_SCAN_MAX_RESULTS][32];
+static uint8_t scanAddrs[BT_SCAN_MAX_RESULTS][6];
 static volatile int scanCount = 0;
 static volatile bool g_scanning = false;
 
@@ -494,6 +571,7 @@ static bool onSsidFound(const char* ssid, esp_bd_addr_t address, int rssi) {
   for (int i = 0; i < scanCount; i++) if (strcmp(scanResults[i], ssid) == 0) return false;
   strncpy(scanResults[scanCount], ssid, sizeof(scanResults[0]) - 1);
   scanResults[scanCount][sizeof(scanResults[0]) - 1] = 0;
+  memcpy(scanAddrs[scanCount], address, 6);
   scanCount++;
   return false; // never auto-connect - the person picks from the list
 }
@@ -506,9 +584,28 @@ void audio_btStartScan() {
   scanCount = 0;
   a2dp.set_ssid_callback(onSsidFound);
   a2dp.set_discovery_mode_callback(onDiscoveryModeChanged);
+  a2dp.set_on_connection_state_changed(onBtConnectionState);
   a2dp.set_data_callback_in_frames(btDataCallback);
-  a2dp.start(); // no name -> open discovery
-  g_btStarted = true;
+  if (!g_btStarted) {
+    a2dp.start(); // no name -> open discovery
+    g_btStarted = true;
+  } else {
+    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0); // stack already up - just search again
+  }
+}
+
+// Connect straight to a device picked from the scan list - no restart needed.
+void audio_btConnectToScanResult(int idx) {
+  if (idx < 0 || idx >= scanCount) return;
+  a2dp.cancel_discovery();
+  strncpy(btName, scanResults[idx], sizeof(btName) - 1);
+  btName[sizeof(btName) - 1] = 0;
+  btSaveAddr(scanAddrs[idx]);
+  a2dp.set_ssid_callback(onSsidMatchSaved); // if the direct connect misses, discovery finds it by name
+  btAttemptStartMs = millis();
+  btQuickConnectDone = true;
+  btEverConnected = false;
+  a2dp.connect_to(scanAddrs[idx]);
 }
 void audio_btStopScan() { if (g_btStarted) a2dp.cancel_discovery(); }
 bool audio_btIsScanning() { return g_scanning; }
