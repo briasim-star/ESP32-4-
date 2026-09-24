@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.4.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.4.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -141,7 +141,7 @@ const char* selCategoryName = "";
 // Adjustable settings, controlled by steppers on the Run screen.
 int powerDisplay = 10;       // what the user sees, 1-100 - NOT the actual output
 int timerMinutes = 30;       // default 30 min auto-stop; 0 = continuous (Off), max 60
-int volumePercent = 60;      // audio volume (speaker or BT), independent of coil output
+int volumePercent = 80;      // audio volume (speaker or BT), independent of coil output
 
 // Program-related mode flags - declared early (not down with the rest of
 // the Program/Category code) since they're referenced by functions that
@@ -624,7 +624,7 @@ void loadSetupInfo() {
   btHeadphonesMode = p.getBool("btHeadphones", false);
   audioOutputPref = (AudioOutput)p.getUChar("audioOut", AUDIO_OUT_SPEAKER);
   sessionSoundMode = (AudioSource)p.getUChar("sndMode", AUDIO_SRC_TONE);
-  volumePercent = p.getInt("volume", 60);
+  volumePercent = p.getInt("volume", 80);
   p.end();
 
   // Room label lives in its own namespace, separate from "setup" - it's a

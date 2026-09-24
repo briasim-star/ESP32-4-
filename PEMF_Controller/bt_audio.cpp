@@ -55,7 +55,7 @@ static const float CARRIER_HZ = 200.0f;
 static const float BINAURAL_MAX_HZ = 30.0f;
 static const float AUDIBLE_HZ = 100.0f;
 static const float DIRECT_MAX_HZ = 1000.0f;
-static const float TONE_LEVEL = 0.55f; // of full scale, before volume
+static const float TONE_LEVEL = 0.85f; // of full scale, before volume (was 0.55 - too quiet out of the box)
 
 static const int SIN_N = 256;
 static float sinTable[SIN_N];
@@ -263,6 +263,13 @@ static void serviceSoundscapeFile() {
 // (Off <-> Tone <-> Soundscape) so there are no clicks.
 // ---------------------------------------------------------------------------
 static AudioSource renderingSource = AUDIO_SRC_OFF;
+static const float SCAPE_GAIN = 1.8f;
+// Keeps boosted audio from wrapping around (which sounds like loud crackles).
+static inline int16_t clip16(float v) {
+  if (v > 32767.0f) return 32767;
+  if (v < -32768.0f) return -32768;
+  return (int16_t)v;
+}
 static float fadeGain = 0.0f;
 static const float FADE_STEP = 1.0f / (AUD_SAMPLE_RATE * 0.04f); // ~40 ms
 
@@ -274,13 +281,15 @@ static void renderFrames(StereoFrame* out, int n) {
   else memset(out, 0, n * sizeof(StereoFrame));
 
   float vol = g_volume;
+  // Soundscape files are mastered quieter than our tone - lift them to match.
+  float srcGain = (renderingSource == AUDIO_SRC_SOUNDSCAPE) ? SCAPE_GAIN : 1.0f;
   bool switching = (want != renderingSource);
   for (int i = 0; i < n; i++) {
     if (switching) { fadeGain -= FADE_STEP; if (fadeGain < 0) fadeGain = 0; }
     else if (fadeGain < 1.0f) { fadeGain += FADE_STEP; if (fadeGain > 1.0f) fadeGain = 1.0f; }
-    float g = fadeGain * vol;
-    out[i].l = (int16_t)(out[i].l * g);
-    out[i].r = (int16_t)(out[i].r * g);
+    float g = fadeGain * vol * srcGain;
+    out[i].l = clip16(out[i].l * g);
+    out[i].r = clip16(out[i].r * g);
   }
   if (switching && fadeGain <= 0.0f) {
     renderingSource = want;
@@ -440,7 +449,7 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 static void btService() {
   if (!g_btStarted) return;
   if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(100); // ~80% of the device's range; our own volume does the rest
+    a2dp.set_volume(115); // ~90% of the headset's range, so it is clearly audible from the start
     btVolumeSent = true;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
