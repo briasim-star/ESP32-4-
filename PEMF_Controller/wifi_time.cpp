@@ -90,7 +90,7 @@ void wifitime_begin() {
     delay(100);
   }
   if (WiFi.status() == WL_CONNECTED) {
-    g_timeSynced = doNtpSync(3000);
+    g_timeSynced = doNtpSync(7000); // 3 s was often too short for the time server to answer
   }
   Serial.printf("[TIME] clock %s after %lu ms\n", g_timeSynced ? "set" : "not set", millis() - start);
   WiFi.disconnect(true);

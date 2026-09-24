@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.8"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.9"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -1757,6 +1757,8 @@ void serviceBootButton() {
 }
 
 Screen soundscapesOrigin = SCR_SETTINGS; // where Soundscapes' "Back" returns to - SCR_RUN when entered mid-session instead. Declared here (moved from near the Soundscapes screen code) because handleSettingsItemTap() below uses it - a real "used before declared" build failure otherwise.
+int soundscapesPage = 0;             // (declared here too - the Home "Sounds" tile resets it)
+Screen logOrigin = SCR_SETTINGS;     // where "< Session Log" goes back to: Settings, or Home via the History tile
 
 // ---------------------------------------------------------------------
 // Settings screen - data-driven, paginated grid of uniform-size items,
@@ -1936,6 +1938,7 @@ void handleSettingsItemTap(SettingsItemId id) {
       }
       break;
     case SET_VIEW_LOG:
+      logOrigin = SCR_SETTINGS;
       screen = SCR_LOG;
       break;
     case SET_SOUNDSCAPES:
@@ -2132,7 +2135,7 @@ void drawLogScreen() {
 
 void handleLogTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
-  if (y < 40 && x < 300) screen = SCR_SETTINGS; // "< Session Log" = back to Settings
+  if (y < 40 && x < 300) screen = logOrigin; // "< Session Log" = back to wherever it was opened from
 }
 
 // ---------------------------------------------------------------------
@@ -2570,21 +2573,25 @@ Rect btnResumeNo  = {250, 180, 170, 46};
 Rect btnQuickStart = {18, 48, 290, 70};
 Rect btnFavorites  = {318, 48, 144, 70};
 
-enum HomeTile : uint8_t { TILE_CATEGORY, TILE_PROGRAMS, TILE_CUSTOM, TILE_SETTINGS };
+enum HomeTile : uint8_t { TILE_CATEGORY, TILE_PROGRAMS, TILE_CUSTOM, TILE_SETTINGS, TILE_SOUNDS, TILE_SLEEPNIGHT, TILE_HISTORY };
 struct HomeTileDef { const char* label; HomeTile kind; Category cat; int colorIdx; };
 // colorIdx: 0 orange, 1 coral, 2 pink, 3 magenta, 4 violet, 5 blue, -1 cyan, -2 dim
-static const HomeTileDef HOME_TILES[9] = {
-  {"Sleep",    TILE_CATEGORY, CAT_HEART_CIRC,       5},
-  {"Focus",    TILE_CATEGORY, CAT_MENTAL_COGNITIVE, 4},
-  {"Wellness", TILE_CATEGORY, CAT_CHRONIC_SYSTEMIC, 2},
-  {"Athletic", TILE_CATEGORY, CAT_PAIN_RECOVERY,    0},
-  {"Body",     TILE_CATEGORY, CAT_BONE_JOINT,       1},
-  {"Skin",     TILE_CATEGORY, CAT_SKIN_WOUND,       3},
-  {"Journeys", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
-  {"Custom",   TILE_CUSTOM,   CAT_BONE_JOINT,      -2},
-  {"Settings", TILE_SETTINGS, CAT_BONE_JOINT,      -2},
+static const int NUM_HOME_TILES = 12; // 4 across x 3 rows
+static const HomeTileDef HOME_TILES[NUM_HOME_TILES] = {
+  {"Sleep",       TILE_CATEGORY,   CAT_HEART_CIRC,       5},
+  {"Focus",       TILE_CATEGORY,   CAT_MENTAL_COGNITIVE, 4},
+  {"Wellness",    TILE_CATEGORY,   CAT_CHRONIC_SYSTEMIC, 2},
+  {"Athletic",    TILE_CATEGORY,   CAT_PAIN_RECOVERY,    0},
+  {"Body",        TILE_CATEGORY,   CAT_BONE_JOINT,       1},
+  {"Skin",        TILE_CATEGORY,   CAT_SKIN_WOUND,       3},
+  {"Journeys",    TILE_PROGRAMS,   CAT_BONE_JOINT,      -1},
+  {"Custom",      TILE_CUSTOM,     CAT_BONE_JOINT,      -2},
+  {"Sounds",      TILE_SOUNDS,     CAT_BONE_JOINT,      -1},
+  {"Sleep Night", TILE_SLEEPNIGHT, CAT_BONE_JOINT,       5},
+  {"History",     TILE_HISTORY,    CAT_BONE_JOINT,      -2},
+  {"Settings",    TILE_SETTINGS,   CAT_BONE_JOINT,      -2},
 };
-Rect homeTileRects[9];
+Rect homeTileRects[NUM_HOME_TILES];
 
 uint16_t tileColor(int idx) {
   if (idx >= 0) return MADD_SPECTRUM[idx];
@@ -2651,14 +2658,17 @@ void drawCategoryScreen() {
   drawChamfer(btnFavorites, MADD_PANEL, MADD_EDGE);
   drawFittedText(btnFavorites.x + 22, btnFavorites.y + 24, 110, "Favorites", FONT_LG, MADD_TEXT, MADD_PANEL);
 
-  // 3 x 3 tiles, each with its own color edge
-  for (int i = 0; i < 9; i++) {
-    int col = i % 3, row = i / 3;
-    Rect r = {18 + col * 150, 126 + row * 56, 144, 50};
+  // 4 x 3 tiles, each with its own color edge. Big font where the label
+  // fits, the smaller one where it doesn't (never cut off).
+  for (int i = 0; i < NUM_HOME_TILES; i++) {
+    int col = i % 4, row = i / 4;
+    Rect r = {18 + col * 112, 126 + row * 56, 108, 50};
     homeTileRects[i] = r;
     drawChamfer(r, MADD_PANEL, MADD_EDGE, 8);
     tft.fillRect(r.x, r.y + 8, 4, r.h - 16, tileColor(HOME_TILES[i].colorIdx));
-    drawFittedText(r.x + 16, r.y + 15, r.w - 24, HOME_TILES[i].label, FONT_LG, MADD_TEXT, MADD_PANEL);
+    tft.setFreeFont(FONT_LG);
+    bool big = tft.textWidth(HOME_TILES[i].label) <= r.w - 18;
+    drawFittedText(r.x + 12, r.y + (big ? 15 : 17), r.w - 16, HOME_TILES[i].label, big ? FONT_LG : FONT_SM, MADD_TEXT, MADD_PANEL);
   }
 
   if (resumeOffer) { // power was lost mid-session
@@ -2704,7 +2714,7 @@ void handleCategoryTouch(int x, int y) {
     screen = SCR_LIST;
     return;
   }
-  for (int i = 0; i < 9; i++) {
+  for (int i = 0; i < NUM_HOME_TILES; i++) {
     if (!touchInRect(x, y, homeTileRects[i])) continue;
     switch (HOME_TILES[i].kind) {
       case TILE_CATEGORY:
@@ -2717,6 +2727,9 @@ void handleCategoryTouch(int x, int y) {
       case TILE_PROGRAMS: screen = SCR_SEQUENCES; break;
       case TILE_CUSTOM:   screen = SCR_CUSTOM_FREQ; break;
       case TILE_SETTINGS: screen = SCR_SETTINGS; break;
+      case TILE_SOUNDS:   soundscapesOrigin = SCR_CATEGORY; soundscapesPage = 0; screen = SCR_SOUNDSCAPES; break;
+      case TILE_SLEEPNIGHT: openSleepSetup(); break;
+      case TILE_HISTORY:  logOrigin = SCR_CATEGORY; screen = SCR_LOG; break;
     }
     return;
   }
@@ -2817,8 +2830,9 @@ void handleSequencesTouch(int x, int y) {
 // playback. Uses the same Bluetooth audio output as the tone-sync
 // feature (mutually exclusive with it - only one plays at a time).
 // ---------------------------------------------------------------------
-int soundscapesPage = 0;
-const int SOUNDSCAPES_PER_PAGE = 6;
+const int SOUNDSCAPES_PER_PAGE = 4;               // two rows - the third row is the volume control
+Rect btnSndVolMinus = {18, 164, 64, 44};
+Rect btnSndVolPlus  = {398, 164, 64, 44};
 Rect soundscapeItemRects[SOUNDSCAPES_PER_PAGE];
 Rect btnSndPrevPage = {18, 222, 140, 42};
 Rect btnSndBack = {170, 222, 140, 42};
@@ -2852,6 +2866,9 @@ void drawSoundscapesScreen() {
       drawFittedText(r.x + 14, r.y + 15, r.w - 22, name, FONT_LG, MADD_TEXT, MADD_PANEL);
     }
   }
+  char vol[24];
+  snprintf(vol, sizeof(vol), "%s %d%%", audioUsingBluetooth() ? "BT volume" : "Volume", volumePercent);
+  drawValueRow(btnSndVolMinus, btnSndVolPlus, vol);
   drawPagerRow(btnSndPrevPage, btnSndBack, btnSndNextPage, soundscapesPage, (count + SOUNDSCAPES_PER_PAGE - 1) / SOUNDSCAPES_PER_PAGE);
   if (soundscapesOrigin != SCR_RUN) {
     drawFittedText(18, 272, 444, "Tap to preview, tap again to stop.", FONT_SM, MADD_DIM, MADD_PANEL);
@@ -2881,6 +2898,14 @@ void handleSoundscapesTouch(int x, int y) {
       previewSoundscapeIndex = (previewSoundscapeIndex == idx) ? -1 : idx;
     }
     return;
+  }
+  if (touchInRect(x, y, btnSndVolMinus) || touchInRect(x, y, btnSndVolPlus)) {
+    volumePercent += touchInRect(x, y, btnSndVolPlus) ? 5 : -5;
+    if (volumePercent < 0) volumePercent = 0;
+    if (volumePercent > 100) volumePercent = 100;
+    audio_setVolume((uint8_t)volumePercent);
+    settingsDirtyAt = millis(); // saved after leaving this screen (never mid-sound)
+    return;                     // same screen -> loop() repaints it with the new value
   }
   if (touchInRect(x, y, btnSndPrevPage)) {
     if (soundscapesPage > 0) soundscapesPage--;
@@ -2930,7 +2955,7 @@ void drawPagerRow(Rect prev, Rect back, Rect next, int page, int pages) {
 
 // The color a category uses on the Home tiles, reused on its list.
 uint16_t categoryColor(Category c) {
-  for (int i = 0; i < 9; i++)
+  for (int i = 0; i < NUM_HOME_TILES; i++)
     if (HOME_TILES[i].kind == TILE_CATEGORY && HOME_TILES[i].cat == c) return tileColor(HOME_TILES[i].colorIdx);
   return MADD_MAGENTA;
 }
@@ -4389,7 +4414,7 @@ void loop() {
   // Volume / sound choice: saved when you leave the session (or 4 s after
   // the last tap if nothing is playing) - never while sound is playing,
   // because a save pauses the chip briefly and that can crackle the audio.
-  if (settingsDirtyAt && (screen != SCR_RUN || (audio_getSource() == AUDIO_SRC_OFF && millis() - settingsDirtyAt > 4000))) {
+  if (settingsDirtyAt && ((screen != SCR_RUN && screen != SCR_SOUNDSCAPES) || (audio_getSource() == AUDIO_SRC_OFF && millis() - settingsDirtyAt > 4000))) {
     settingsDirtyAt = 0;
     saveSetupInfo();
   }
