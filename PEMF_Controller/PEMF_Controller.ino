@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -703,6 +703,7 @@ void drawTopBar(const char* title, bool showBack, bool showHome = false) {
 
 
 bool checkInEnabled = true; // "How do you feel?" before/after sessions (Settings -> Check-in)
+unsigned long settingsDirtyAt = 0; // volume/sound changed - saved a few seconds later by loop() (0 = nothing waiting)
 
 void loadSetupInfo() {
   Preferences p;
@@ -3603,7 +3604,7 @@ void handleRunTouch(int x, int y) {
     if (volumePercent < 0) volumePercent = 0;
     if (volumePercent > 100) volumePercent = 100;
     audio_setVolume((uint8_t)volumePercent);
-    saveSetupInfo();
+    settingsDirtyAt = millis(); // saved when the session ends (saving mid-sound can crackle)
     return;
   }
   if (touchInRect(x, y, btnTmrMinus) || touchInRect(x, y, btnTmrPlus)) {
@@ -3638,12 +3639,12 @@ void handleRunTouch(int x, int y) {
     }
     return;
   }
-  if (touchInRect(x, y, btnSndOff))  { sessionSoundMode = AUDIO_SRC_OFF;  saveSetupInfo(); return; }
-  if (touchInRect(x, y, btnSndTone)) { sessionSoundMode = AUDIO_SRC_TONE; saveSetupInfo(); return; }
+  if (touchInRect(x, y, btnSndOff))  { sessionSoundMode = AUDIO_SRC_OFF;  settingsDirtyAt = millis(); return; }
+  if (touchInRect(x, y, btnSndTone)) { sessionSoundMode = AUDIO_SRC_TONE; settingsDirtyAt = millis(); return; }
   if (sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnSndScape)) {
     sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
     if (sessionSoundscapeIndex < 0) sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
-    saveSetupInfo();
+    settingsDirtyAt = millis();
     return;
   }
   if (sdmedia_soundscapeCount() > 0 && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && touchInRect(x, y, btnPickSound)) {
@@ -4115,6 +4116,11 @@ void resumeSleepNightIfSaved() {
   startSleepNight((unsigned long)left, idx);
 }
 
+// Survives a software restart (not a power-on): tells the next start to
+// skip WiFi, because this start just used it.
+static const uint32_t BOOT_SKIP_WIFI = 0xC10CC10Cu;
+RTC_NOINIT_ATTR uint32_t bootSkipWifiMagic;
+
 void setup() {
   Serial.begin(115200);
   Serial.printf("[BOOT] reset reason %d (3=restart 4=crash 5/6=watchdog)\n", (int)esp_reset_reason()); // USB only
@@ -4150,12 +4156,23 @@ void setup() {
   audio_setBtDeviceName(btDeviceName);
   wifitime_loadTz();
 
-  playStartupAnimation();
   // Clock: a quick WiFi time check BEFORE Bluetooth starts (WiFi and
   // Bluetooth share one radio and the memory). Takes ~2-4 s when WiFi is
-  // set up; skipped entirely when it isn't. Then Bluetooth connects.
+  // set up; skipped entirely when it isn't, or when the clock is already
+  // set. WiFi doesn't hand back all of its memory when switched off (~15 KB
+  // measured), and Bluetooth needs it. So after setting the clock the
+  // board restarts once: the clock survives the restart, WiFi is skipped
+  // the second time, and Bluetooth starts with all of its memory.
+  bool skipWifi = (bootSkipWifiMagic == BOOT_SKIP_WIFI);
+  bootSkipWifiMagic = 0;
+  if (!skipWifi) playStartupAnimation(); // shown once, not again after the clock restart
   if (!updatePending) {
-    wifitime_begin();
+    if (!skipWifi && !wifitime_hasRealTime() && wifitime_isConfigured()) {
+      wifitime_begin();
+      bootSkipWifiMagic = BOOT_SKIP_WIFI; // don't try WiFi again on the next start, even if it failed
+      Serial.println("[TIME] restarting so Bluetooth gets its memory back");
+      ESP.restart();
+    }
     applyAudioOutput();
   }
   wifitime_onConnecting(showWifiConnecting);
@@ -4222,7 +4239,8 @@ void setup() {
 
   if (updatePending) {
     runPendingUpdateCheck(); // before Bluetooth starts, so the download has the memory it needs
-    applyAudioOutput();
+    bootSkipWifiMagic = BOOT_SKIP_WIFI; // WiFi was just used: restart once so Bluetooth gets its memory back
+    ESP.restart();
   }
   Serial.printf("[MEM] free after startup: %u bytes\n", ESP.getFreeHeap());
   resumeSleepNightIfSaved();
@@ -4297,6 +4315,14 @@ void loop() {
   }
 
   updateProgram();
+
+  // Volume / sound choice: saved when you leave the session (or 4 s after
+  // the last tap if nothing is playing) - never while sound is playing,
+  // because a save pauses the chip briefly and that can crackle the audio.
+  if (settingsDirtyAt && (screen != SCR_RUN || (audio_getSource() == AUDIO_SRC_OFF && millis() - settingsDirtyAt > 4000))) {
+    settingsDirtyAt = 0;
+    saveSetupInfo();
+  }
 
   // Resume point for a power loss: minutes left, saved once a minute
   static unsigned long lastResumeSave = 0;

@@ -178,10 +178,13 @@ void wifitime_forgetNetwork() {
   g_timeSynced = false;
 }
 
-bool wifitime_hasRealTime() { return g_timeSynced; }
+// The chip's clock keeps running through a software restart and the
+// BOOT-button "off" (deep sleep), so a clock set earlier is still good -
+// only unplugging loses it. Any time after 2023 counts as real.
+bool wifitime_hasRealTime() { return g_timeSynced || time(nullptr) > 1700000000; }
 
 time_t wifitime_now() {
-  if (!g_timeSynced) return 0;
+  if (!wifitime_hasRealTime()) return 0;
   time_t now;
   time(&now);
   return now;

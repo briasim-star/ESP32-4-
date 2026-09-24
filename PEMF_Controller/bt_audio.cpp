@@ -336,14 +336,19 @@ static void renderFrames(StereoFrame* out, int n) {
   float srcGain = (renderingSource == AUDIO_SRC_SOUNDSCAPE) ? SCAPE_GAIN : 1.0f;
   bool switching = (want != renderingSource);
   float nTarget = g_nightTarget, alpha = g_nightAlpha;
+  // Volume glides to its new level over ~20 ms instead of jumping - an
+  // instant jump mid-waveform is heard as a click/crackle (worst in headphones).
+  static float volSmooth = -1.0f;
+  if (volSmooth < 0) volSmooth = vol;
   for (int i = 0; i < n; i++) {
     if (switching) { fadeGain -= FADE_STEP; if (fadeGain < 0) fadeGain = 0; }
     else if (fadeGain < 1.0f) { fadeGain += FADE_STEP; if (fadeGain > 1.0f) fadeGain = 1.0f; }
+    volSmooth += (vol - volSmooth) * 0.0012f;
     nightGain += (nTarget - nightGain) * 0.0005f;
     float l = out[i].l, r = out[i].r;
     if (alpha < 0.999f) { lpL += alpha * (l - lpL); lpR += alpha * (r - lpR); l = lpL; r = lpR; }
     else { lpL = l; lpR = r; }
-    float g = fadeGain * vol * srcGain * nightGain;
+    float g = fadeGain * volSmooth * srcGain * nightGain;
     out[i].l = softLimit(l * g);
     out[i].r = softLimit(r * g);
   }
