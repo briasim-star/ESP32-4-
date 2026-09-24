@@ -280,6 +280,37 @@ static void refillRing() {
   }
 }
 
+// ---- Built-in noise (paths "noise:white" / "noise:pink" / "noise:brown") ----
+// Generated live, one independent generator per ear so it sounds wide in
+// headphones. No file = no repeat point, ever.
+static volatile int8_t g_noiseColor = -1; // -1 = a WAV file is the soundscape; 0 white, 1 pink, 2 brown
+struct NoiseState { uint32_t seed; float b0, b1, b2, brown; };
+static NoiseState noiseL = {0x12345678u, 0, 0, 0, 0}, noiseR = {0x9E3779B9u, 0, 0, 0, 0};
+
+static inline float noiseSample(NoiseState& s, int color) {
+  s.seed = s.seed * 1664525u + 1013904223u;
+  float w = ((int32_t)s.seed) * (1.0f / 2147483648.0f); // -1..1
+  if (color == 0) return w * 0.30f;                      // white: bright, so kept lower
+  if (color == 1) {                                      // pink: Paul Kellet's economy filter
+    s.b0 = 0.99765f * s.b0 + w * 0.0990460f;
+    s.b1 = 0.96300f * s.b1 + w * 0.2965164f;
+    s.b2 = 0.57000f * s.b2 + w * 1.0526913f;
+    return (s.b0 + s.b1 + s.b2 + w * 0.1848f) * 0.16f;
+  }
+  s.brown = (s.brown + 0.02f * w) / 1.02f;               // brown: deep, soft rumble
+  return s.brown * 3.2f;
+}
+
+static void renderNoise(StereoFrame* out, int n) {
+  int c = g_noiseColor;
+  for (int i = 0; i < n; i++) {
+    float l = fmaxf(-1.0f, fminf(1.0f, noiseSample(noiseL, c)));
+    float r = fmaxf(-1.0f, fminf(1.0f, noiseSample(noiseR, c)));
+    out[i].l = (int16_t)(l * 32767.0f);
+    out[i].r = (int16_t)(r * 32767.0f);
+  }
+}
+
 static void serviceSoundscapeFile() {
   if (pendingOpen) {
     char path[64];
@@ -288,11 +319,19 @@ static void serviceSoundscapeFile() {
     pendingOpen = false;
     portEXIT_CRITICAL(&pathMux);
     ringReset();
-    sdmedia_lock();
-    openWav(path);
-    sdmedia_unlock();
+    if (strncmp(path, "noise:", 6) == 0) {
+      if (sndFile) { sdmedia_lock(); sndFile.close(); sdmedia_unlock(); }
+      sndDataSize = 0;
+      g_noiseColor = !strcmp(path + 6, "white") ? 0 : !strcmp(path + 6, "pink") ? 1 : 2;
+      Serial.printf("[SCAPE] built-in %s noise\n", path + 6);
+    } else {
+      g_noiseColor = -1;
+      sdmedia_lock();
+      openWav(path);
+      sdmedia_unlock();
+    }
   }
-  refillRing();
+  if (g_noiseColor < 0) refillRing();
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +361,11 @@ static inline int16_t clip16(float v) {
   if (v < -32768.0f) return -32768;
   return (int16_t)v;
 }
+// Diagnostics: loudest sample produced since the last audio_takeLevelPeak()
+// (the USB log prints it twice a second to find silences in playback).
+static volatile int16_t g_levelPeak = 0;
+int audio_takeLevelPeak() { int p = g_levelPeak; g_levelPeak = 0; return p; }
+
 static float fadeGain = 0.0f;
 static const float FADE_STEP = 1.0f / (AUD_SAMPLE_RATE * 0.04f); // ~40 ms
 
@@ -342,7 +386,7 @@ void audio_setNightShape(float gain, float warmth) {
 static void renderFrames(StereoFrame* out, int n) {
   AudioSource want = g_source;
 
-  if (renderingSource == AUDIO_SRC_SOUNDSCAPE) ringPull(out, n);
+  if (renderingSource == AUDIO_SRC_SOUNDSCAPE) { if (g_noiseColor >= 0) renderNoise(out, n); else ringPull(out, n); }
   else if (renderingSource == AUDIO_SRC_TONE) renderTone(out, n);
   else memset(out, 0, n * sizeof(StereoFrame));
 
@@ -366,6 +410,8 @@ static void renderFrames(StereoFrame* out, int n) {
     float g = fadeGain * volSmooth * srcGain * nightGain;
     out[i].l = softLimit(l * g);
     out[i].r = softLimit(r * g);
+    int16_t a = out[i].l < 0 ? -out[i].l : out[i].l;
+    if (a > g_levelPeak) g_levelPeak = a;
   }
   if (switching && fadeGain <= 0.0f) {
     renderingSource = want;

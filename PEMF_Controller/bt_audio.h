@@ -88,3 +88,4 @@ bool audio_speakerReady();                 // I2S/DAC driver installed OK
 uint32_t audio_btFramesSent();             // audio frames the BT stack has pulled from us
 int audio_btLastPeak();                    // loudness of the last BT block (0 = silence)
 unsigned long audio_underruns();           // soundscape buffer ran dry (should stay ~0)
+int audio_takeLevelPeak();                 // loudest output sample since the last call (0-32767), then resets

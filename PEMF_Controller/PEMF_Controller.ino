@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.7"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.8"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -440,12 +440,31 @@ bool nameHas(const char* name, const char* kw) {
   return false;
 }
 
+// ---- The sound list: SD card files first, then the built-in noises ----
+// White / Pink / Brown noise are generated live by the audio engine (the
+// "noise:" paths) - no file, so they never repeat and need no SD card.
+static const int NUM_NOISES = 3;
+static const char* NOISE_NAMES[NUM_NOISES] = {"white_noise", "pink_noise", "brown_noise"};
+static const char* NOISE_PATHS[NUM_NOISES] = {"noise:white", "noise:pink", "noise:brown"};
+int scapeCount() { return sdmedia_soundscapeCount() + NUM_NOISES; }
+const char* scapeName(int i) {
+  int n = sdmedia_soundscapeCount();
+  if (i >= 0 && i < n) return sdmedia_soundscapeName(i);
+  return (i >= n && i < n + NUM_NOISES) ? NOISE_NAMES[i - n] : "";
+}
+const char* scapePath(int i) {
+  int n = sdmedia_soundscapeCount();
+  if (i >= 0 && i < n) return sdmedia_soundscapePath(i);
+  return (i >= n && i < n + NUM_NOISES) ? NOISE_PATHS[i - n] : "";
+}
+
 // Picks a soundscape that suits the session - matched by file name, so
 // it works with whatever is on the card (rain, ocean_waves, forest,
-// fireplace, thunder, city_ambience...). Falls back to the first file.
+// fireplace, thunder, city_ambience...). Falls back to the first file,
+// or to Pink Noise when there's no SD card.
 int defaultSoundscapeFor(const char* categoryName, float freqHz) {
-  int n = sdmedia_soundscapeCount();
-  if (n == 0) return -1;
+  int n = scapeCount();
+  if (sdmedia_soundscapeCount() == 0) return 1; // pink noise
   const char* sleepy[]   = {"rain", "ocean", "fire"};
   const char* focus[]    = {"forest", "fire", "rain"};
   const char* athletic[] = {"thunder", "forest", "ocean"};
@@ -458,13 +477,13 @@ int defaultSoundscapeFor(const char* categoryName, float freqHz) {
   else if (nameHas(categoryName, "body") || nameHas(categoryName, "skin")) prefs = body;
   for (int p = 0; p < 3; p++)
     for (int i = 0; i < n; i++)
-      if (nameHas(sdmedia_soundscapeName(i), prefs[p])) return i;
+      if (nameHas(scapeName(i), prefs[p])) return i;
   return 0;
 }
 
 // "ocean_waves" -> "Ocean Waves"
 void prettySoundName(int idx, char* out, size_t outLen) {
-  const char* raw = sdmedia_soundscapeName(idx);
+  const char* raw = scapeName(idx);
   size_t i = 0;
   bool cap = true;
   for (; raw[i] && i < outLen - 1; i++) {
@@ -1760,7 +1779,7 @@ int buildVisibleSettingsItems(SettingsItemId* out) {
   out[n++] = SET_TIMEZONE;
   out[n++] = SET_CHECKIN;
   out[n++] = SET_VIEW_LOG;
-  if (sdmedia_isAvailable() && sdmedia_soundscapeCount() > 0) out[n++] = SET_SOUNDSCAPES;
+  out[n++] = SET_SOUNDSCAPES; // built-in noises are always there, even without an SD card
   out[n++] = SET_RECAL_TOUCH;
   out[n++] = SET_FACTORY_RESET;
   return n;
@@ -2816,7 +2835,7 @@ void drawSoundscapesScreen() {
   drawAuroraBackground();
   drawTopBar(soundscapesOrigin == SCR_RUN ? "Pick a sound" : "Soundscapes", true, soundscapesOrigin != SCR_RUN);
 
-  int count = sdmedia_soundscapeCount();
+  int count = scapeCount();
   int highlighted = (soundscapesOrigin == SCR_RUN) ? sessionSoundscapeIndex : previewSoundscapeIndex;
   int start = soundscapesPage * SOUNDSCAPES_PER_PAGE;
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
@@ -2848,7 +2867,7 @@ void handleSoundscapesTouch(int x, int y) {
     return;
   }
   if (y < 36 && x < 300) { stopPreview(); screen = soundscapesOrigin; return; } // "< title" = back
-  int count = sdmedia_soundscapeCount();
+  int count = scapeCount();
   int start = soundscapesPage * SOUNDSCAPES_PER_PAGE;
   for (int i = 0; i < SOUNDSCAPES_PER_PAGE; i++) {
     int idx = start + i;
@@ -3255,7 +3274,7 @@ void syncAudio() {
     scapeIdx = previewSoundscapeIndex;
   }
 
-  if (src == AUDIO_SRC_SOUNDSCAPE) audio_setSoundscapeFile(sdmedia_soundscapePath(scapeIdx));
+  if (src == AUDIO_SRC_SOUNDSCAPE) audio_setSoundscapeFile(scapePath(scapeIdx));
   audio_setToneFrequency(liveFrequency());
   audio_setSource(src);
 }
@@ -3515,7 +3534,7 @@ void refreshRunControls() {
   }
 
   // Sound choice - the lit one is what's playing
-  bool haveScapes = sdmedia_soundscapeCount() > 0;
+  bool haveScapes = scapeCount() > 0;
   uint16_t onFill = tft.color565(12, 58, 68);
   drawChamferButton(btnSndOff, "Off", sessionSoundMode == AUDIO_SRC_OFF ? tft.color565(40, 30, 64) : MADD_PANEL,
                     sessionSoundMode == AUDIO_SRC_OFF ? MADD_DIM : MADD_EDGE, MADD_TEXT);
@@ -3691,13 +3710,13 @@ void handleRunTouch(int x, int y) {
   }
   if (touchInRect(x, y, btnSndOff))  { sessionSoundMode = AUDIO_SRC_OFF;  settingsDirtyAt = millis(); return; }
   if (touchInRect(x, y, btnSndTone)) { sessionSoundMode = AUDIO_SRC_TONE; settingsDirtyAt = millis(); return; }
-  if (sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnSndScape)) {
+  if (scapeCount() > 0 && touchInRect(x, y, btnSndScape)) {
     sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
     if (sessionSoundscapeIndex < 0) sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
     settingsDirtyAt = millis();
     return;
   }
-  if (sdmedia_soundscapeCount() > 0 && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && touchInRect(x, y, btnPickSound)) {
+  if (scapeCount() > 0 && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && touchInRect(x, y, btnPickSound)) {
     soundscapesOrigin = SCR_RUN;
     if (sessionSoundscapeIndex >= 0) soundscapesPage = sessionSoundscapeIndex / SOUNDSCAPES_PER_PAGE;
     screen = SCR_SOUNDSCAPES; // the session keeps running while picking
@@ -3983,18 +4002,18 @@ void sleepLightScreen() {
 }
 
 void startSleepNight(unsigned long minutes, int scapeIdx) {
-  if (scapeIdx < 0 || scapeIdx >= sdmedia_soundscapeCount()) { Serial.println("[SLEEP] no soundscape on the SD card"); return; }
+  if (scapeIdx < 0 || scapeIdx >= scapeCount()) { Serial.println("[SLEEP] no soundscape on the SD card"); return; }
   if (waveform_isRunning()) endSession(); // sound only - the coil never runs in Sleep Night
   startCountdownAt = 0;
   sleepScapeIdx = scapeIdx;
   sleepNightOn = true; sleepDarkAfter = false;
   sleepStartMs = millis(); sleepTotalMs = minutes * 60000UL; sleepLastSave = 0;
   audio_setNightShape(0.0f, 0.0f);     // loop() raises it gently over 20 s
-  audio_setSoundscapeFile(sdmedia_soundscapePath(scapeIdx));
+  audio_setSoundscapeFile(scapePath(scapeIdx));
   audio_setSource(AUDIO_SRC_SOUNDSCAPE);
   saveSleepNight((int)minutes);
   sleepLightScreen();
-  Serial.printf("[SLEEP] started: %lu min, sound '%s'\n", minutes, sdmedia_soundscapeName(scapeIdx));
+  Serial.printf("[SLEEP] started: %lu min, sound '%s'\n", minutes, scapeName(scapeIdx));
 }
 
 void stopSleepNight(bool stayDark) {
@@ -4070,11 +4089,11 @@ void drawSleepSetup() {
 
 // Called from the Sleep list. Drawn on the next pass, after the list's own tap handling.
 void openSleepSetup() {
-  if (sdmedia_soundscapeCount() == 0) {
+  if (scapeCount() == 0) {
     drawBootBanner("Add sound files to the SD card first", COLOR_WARN);
     return;
   }
-  if (sleepSetupScape < 0 || sleepSetupScape >= sdmedia_soundscapeCount()) sleepSetupScape = defaultSoundscapeFor("sleep", 1.0f);
+  if (sleepSetupScape < 0 || sleepSetupScape >= scapeCount()) sleepSetupScape = defaultSoundscapeFor("sleep", 1.0f);
   sleepSetupOn = true;
   sleepSetupDraw = true;
 }
@@ -4083,17 +4102,17 @@ void serviceSleepSetup(bool press, int tx, int ty) {
   if (sleepSetupDraw) {
     sleepSetupDraw = false;
     audio_setNightShape(1.0f, 0.0f);
-    audio_setSoundscapeFile(sdmedia_soundscapePath(sleepSetupScape));
+    audio_setSoundscapeFile(scapePath(sleepSetupScape));
     audio_setSource(AUDIO_SRC_SOUNDSCAPE);          // preview while choosing
     drawSleepSetup();
     return;
   }
   if (!press) return;
-  int n = sdmedia_soundscapeCount();
+  int n = scapeCount();
   bool redraw = false;
   if (touchInRect(tx, ty, slPrev) || touchInRect(tx, ty, slNext)) {
     sleepSetupScape = (sleepSetupScape + (touchInRect(tx, ty, slNext) ? 1 : n - 1)) % n;
-    audio_setSoundscapeFile(sdmedia_soundscapePath(sleepSetupScape));
+    audio_setSoundscapeFile(scapePath(sleepSetupScape));
     redraw = true;
   }
   for (int i = 0; i < 4; i++) if (touchInRect(tx, ty, slLenRect(i))) { sleepSetupLen = i; redraw = true; }
@@ -4162,7 +4181,7 @@ void resumeSleepNightIfSaved() {
   int idx = p.getInt("scape", -1);
   p.end();
   if (left <= 0) return;
-  if (idx < 0 || idx >= sdmedia_soundscapeCount()) idx = defaultSoundscapeFor("sleep", 1.0f);
+  if (idx < 0 || idx >= scapeCount()) idx = defaultSoundscapeFor("sleep", 1.0f);
   Serial.printf("[SLEEP] resuming: %d min left\n", left);
   startSleepNight((unsigned long)left, idx);
 }
@@ -4450,6 +4469,18 @@ void loop() {
 
   // Hidden audio health report, USB cable only (never on screen): every 2 s
   // while sound is playing - frames sent to Bluetooth, buffer gaps, free memory.
+  // Output level twice a second while sound plays: 10 readings per line
+  // (0 = silence, 32767 = full scale) - shows exactly when playback goes quiet.
+  static unsigned long lastLevelTick = 0;
+  static int levels[10], levelN = 0;
+  if (audio_getSource() != AUDIO_SRC_OFF && millis() - lastLevelTick >= 500) {
+    lastLevelTick = millis();
+    levels[levelN++] = audio_takeLevelPeak();
+    if (levelN == 10) {
+      Serial.printf("[LVL] %d %d %d %d %d %d %d %d %d %d\n", levels[0], levels[1], levels[2], levels[3], levels[4], levels[5], levels[6], levels[7], levels[8], levels[9]);
+      levelN = 0;
+    }
+  }
   static unsigned long lastAudioReport = 0;
   if (audio_getSource() != AUDIO_SRC_OFF && millis() - lastAudioReport > 2000) {
     static uint32_t lastFrames = 0; static unsigned long lastUnder = 0;
