@@ -2592,6 +2592,7 @@ static const HomeTileDef HOME_TILES[NUM_HOME_TILES] = {
   {"Settings",    TILE_SETTINGS,   CAT_BONE_JOINT,      -2},
 };
 Rect homeTileRects[NUM_HOME_TILES];
+void openSleepSetup(); // defined with Sleep Night, near the end - the "Sleep Night" tile calls it
 
 uint16_t tileColor(int idx) {
   if (idx >= 0) return MADD_SPECTRUM[idx];
