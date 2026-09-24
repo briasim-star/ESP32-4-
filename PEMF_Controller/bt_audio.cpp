@@ -105,7 +105,7 @@ static void renderTone(StereoFrame* out, int n) {
 // Consumer = whichever output is active. Index updates are guarded by a
 // spinlock; a generation counter makes a file switch safe mid-read.
 // ---------------------------------------------------------------------------
-static const int RING_FRAMES = 6144; // ~140 ms
+static const int RING_FRAMES = 4096; // ~93 ms - the audio task refills every ~5 ms
 static StereoFrame sndRing[RING_FRAMES];
 static int ringWritePos = 0, ringReadPos = 0, ringFilled = 0;
 static uint32_t ringGen = 0;
@@ -365,12 +365,26 @@ static char btName[64] = "";
 static bool g_btStarted = false;
 static bool btVolumeSent = false;
 
+// Diagnostics: proves whether the BT stack is actually pulling audio from us,
+// and whether what we hand it is silent or not.
+static volatile uint32_t btFramesSent = 0;
+static volatile int16_t btLastPeak = 0;
+
 static int32_t btDataCallback(Frame* data, int32_t len) {
+  if (len <= 0) return 0;
   if (g_output != AUDIO_OUT_BLUETOOTH) {
     memset(data, 0, len * sizeof(Frame));
-    return len;
+  } else {
+    renderFrames((StereoFrame*)data, len);
   }
-  renderFrames((StereoFrame*)data, len);
+  int16_t peak = 0;
+  StereoFrame* f = (StereoFrame*)data;
+  for (int32_t i = 0; i < len; i += 8) {
+    int16_t a = f[i].l < 0 ? -f[i].l : f[i].l;
+    if (a > peak) peak = a;
+  }
+  btLastPeak = peak;
+  btFramesSent += len;
   return len;
 }
 
@@ -406,11 +420,18 @@ void audio_begin() {
   if (begun) return;
   begun = true;
   for (int i = 0; i < SIN_N; i++) sinTable[i] = sinf(TWO_PI_F * i / SIN_N);
-  speakerInit();
+  pinMode(AUDIO_ENABLE, OUTPUT);
+  digitalWrite(AUDIO_ENABLE, HIGH); // amp off
+  // The speaker's I2S driver is installed only when the speaker is actually
+  // the chosen output (see audio_setOutput) - it holds ~16 KB of DMA memory
+  // that the Bluetooth stack needs more when Bluetooth is in use.
   xTaskCreatePinnedToCore(audioTask, "audio", 6144, NULL, 3, NULL, 1);
 }
 
-void audio_setOutput(AudioOutput out) { g_output = out; }
+void audio_setOutput(AudioOutput out) {
+  if (out == AUDIO_OUT_SPEAKER && !g_speakerReady) speakerInit();
+  g_output = out;
+}
 AudioOutput audio_getOutput() { return g_output; }
 
 void audio_setSource(AudioSource src) { g_source = src; }
@@ -448,9 +469,8 @@ const char* audio_btDeviceName() { return btName; }
 
 void audio_btConnect() {
   if (g_btStarted || btName[0] == 0) return;
-  a2dp.set_data_callback_in_frames(btDataCallback);
-  a2dp.set_auto_reconnect(true);
-  a2dp.start(btName); // returns quickly; the connection completes in the background
+  // Same call the earlier (working) firmware used for Bluetooth tone output.
+  a2dp.start(btName, btDataCallback); // returns quickly; the connection completes in the background
   g_btStarted = true;
   btVolumeSent = false;
 }
@@ -497,6 +517,9 @@ const char* audio_btScanResultName(int idx) {
   if (idx < 0 || idx >= scanCount) return "";
   return scanResults[idx];
 }
+
+uint32_t audio_btFramesSent() { return btFramesSent; }
+int audio_btLastPeak() { return btLastPeak; }
 
 bool audio_speakerReady() { return g_speakerReady; }
 unsigned long audio_underruns() { return g_underruns; }

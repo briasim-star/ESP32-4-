@@ -522,7 +522,7 @@ void drawButtonFast(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool
   drawFittedLabel(r, label, FONT_SM, fillColor);
 }
 
-Rect btnHome = {365, 4, 105, 40};
+Rect btnHome = {358, 10, 106, 38}; // inset from the bezel
 
 // Small, consistently-placed Home button, top-right corner of every
 // non-home screen. Always returns to the Category screen.
@@ -646,7 +646,7 @@ void drawWelcomeScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("MADD PEMF", 20, 6);
+  tft.drawString("MADD PEMF", 20, 10);
 
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_WARN, COLOR_BG);
@@ -678,19 +678,19 @@ void drawWelcomeScreen() {
   // computer and Serial Monitor to check the same information. Solid
   // backing behind them for the same readability reason as the
   // disclaimer text above - plain text with no button panel of its own.
-  tft.fillRect(0, 276, 480, 44, COLOR_BG);
+  tft.fillRect(0, 274, 480, 46, COLOR_BG);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
   char sdDiag[48];
   if (!sdmedia_isAvailable()) {
-    tft.drawString("SD card: not detected", 20, 282);
+    tft.drawString("SD card: not detected", 20, 278);
   } else if (!sdmedia_lastScanDirOpened()) {
-    tft.drawString("SD card: OK, but /sounds folder not found", 20, 282);
+    tft.drawString("SD card: OK, but /sounds folder not found", 20, 278);
   } else {
     snprintf(sdDiag, sizeof(sdDiag), "SD/sounds: %d entries, %d files, %d matched .wav",
              sdmedia_lastScanTotalEntries(), sdmedia_lastScanFileEntries(), sdmedia_soundscapeCount());
-    tft.drawString(sdDiag, 20, 282);
+    tft.drawString(sdDiag, 20, 278);
   }
 
   char audioDiag[64];
@@ -699,7 +699,7 @@ void drawWelcomeScreen() {
   } else {
     snprintf(audioDiag, sizeof(audioDiag), "Sound out: Speaker (%s)", audio_speakerReady() ? "ready" : "DRIVER FAILED");
   }
-  drawFittedText(20, 302, 440, audioDiag, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+  drawFittedText(20, 296, 440, audioDiag, FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
 }
 
 // The checkbox and Continue button are the only things on this screen
@@ -830,7 +830,7 @@ void drawManagePeopleScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Manage People", 20, 8);
+  tft.drawString("Manage People", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -1001,9 +1001,9 @@ void layoutKeyboard() {
   const char* rows[4] = { KB_ROW1, KB_ROW2, KB_ROW3, KB_ROW4 };
   for (int r = 0; r < 4; r++) {
     int n = strlen(rows[r]);
-    int w = (460 - (n - 1) * gap) / n;
+    int w = (444 - (n - 1) * gap) / n;
     for (int i = 0; i < n; i++) {
-      kbKeyRects[kbKeyCount] = {10 + i * (w + gap), y, w, rowH};
+      kbKeyRects[kbKeyCount] = {18 + i * (w + gap), y, w, rowH};
       kbKeyChars[kbKeyCount] = rows[r][i];
       kbKeyCount++;
     }
@@ -1011,9 +1011,9 @@ void layoutKeyboard() {
   }
 
   y += 4;
-  btnKbSpace     = {10, y, 260, 38};
+  btnKbSpace     = {18, y, 252, 38};
   btnKbBackspace = {276, y, 90, 38};
-  btnKbOk        = {372, y, 98, 38};
+  btnKbOk        = {372, y, 90, 38};
 }
 
 // Renders the buffer with the first letter capitalized, rest lowercase,
@@ -1032,7 +1032,7 @@ void drawTextEntryScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(textEntryPrompt, 20, 4);
+  tft.drawString(textEntryPrompt, 20, 8);
 
   char shown[24];
   formatDisplayName(textEntryBuf, shown, sizeof(shown));
@@ -1096,7 +1096,7 @@ void handleTextEntryTouch(int x, int y) {
 // ---------------------------------------------------------------------
 bool clientConfirmChecked = false;
 Rect clientCheckboxRect = {20, 190, 40, 40};
-Rect btnClientContinue = {60, 260, 200, 48};
+Rect btnClientContinue = {60, 250, 200, 48};
 
 void drawClientConfirmScreen() {
   tft.fillScreen(COLOR_BG);
@@ -1196,7 +1196,7 @@ void drawPinScreen() {
   tft.drawString(pinLen > 0 ? mask : "-", 20, 78);
   pinWrongFlash = false;
 
-  int gx = 220, gy = 20, cellW = 70, cellH = 44, gap = 8;
+  int gx = 220, gy = 24, cellW = 70, cellH = 44, gap = 8;
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 3; c++) {
       int idx = r * 3 + c;
@@ -1318,6 +1318,7 @@ int buildVisibleSettingsItems(SettingsItemId* out) {
   out[n++] = SET_WIFI;
   out[n++] = SET_VIEW_LOG;
   if (sdmedia_isAvailable() && sdmedia_soundscapeCount() > 0) out[n++] = SET_SOUNDSCAPES;
+  out[n++] = SET_RECAL_TOUCH;
   out[n++] = SET_FACTORY_RESET;
   return n;
 }
@@ -1383,6 +1384,9 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       break;
     case SET_SOUNDSCAPES:
       snprintf(labelOut, labelLen, "Soundscapes (%d)", sdmedia_soundscapeCount());
+      break;
+    case SET_RECAL_TOUCH:
+      snprintf(labelOut, labelLen, "Recalibrate Touch");
       break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed && millis() - factoryResetArmedAt > FACTORY_RESET_ARM_WINDOW_MS) factoryResetArmed = false;
@@ -1454,6 +1458,10 @@ void handleSettingsItemTap(SettingsItemId id) {
       soundscapesOrigin = SCR_SETTINGS;
       screen = SCR_SOUNDSCAPES;
       break;
+    case SET_RECAL_TOUCH:
+      runTouchCalibration(); // blocking; Settings redraws right after
+      screen = SCR_SETTINGS;
+      break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed) performFactoryReset();
       else { factoryResetArmed = true; factoryResetArmedAt = millis(); screen = SCR_SETTINGS; }
@@ -1476,7 +1484,7 @@ void drawSettingsScreen() {
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Settings", 20, 8);
+  tft.drawString("Settings", 20, 12);
 
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
@@ -1501,7 +1509,7 @@ void drawSettingsScreen() {
     char pageBuf[20];
     snprintf(pageBuf, sizeof(pageBuf), "Page %d of %d", settingsPage + 1, totalPages);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 460, 16);
+    tft.drawString(pageBuf, 348, 20);
     tft.setTextDatum(TL_DATUM);
   }
 
@@ -1588,7 +1596,7 @@ void drawLogScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Session Log", 20, 6);
+  tft.drawString("Session Log", 20, 12);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -1623,9 +1631,9 @@ void handleLogTouch(int x, int y) {
 // ---------------------------------------------------------------------
 // Screen: Bluetooth device scan/pick
 // ---------------------------------------------------------------------
-Rect btnScanToggle = {20, 36, 440, 42};
-Rect btnHeadphonesToggle = {20, 88, 220, 42};
-Rect btnForgetBt = {260, 88, 200, 42};
+Rect btnScanToggle = {20, 54, 440, 42};
+Rect btnHeadphonesToggle = {20, 104, 220, 42};
+Rect btnForgetBt = {260, 104, 200, 42};
 bool btForgetArmed = false;
 unsigned long btForgetArmedAt = 0;
 Rect btScanResultRects[6];
@@ -1637,7 +1645,7 @@ void drawBtScanScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Bluetooth Device", 20, 6);
+  tft.drawString("Bluetooth Device", 20, 14);
   drawHomeButton();
 
   bool scanning = audio_btIsScanning();
@@ -1646,7 +1654,7 @@ void drawBtScanScreen() {
                         : "Scan for Devices";
   drawButton(btnScanToggle, scanLabel, (scanning || scanRequested) ? COLOR_WARN : COLOR_GOOD, scanning || scanRequested);
 
-  int gridStartY = 88;
+  int gridStartY = 104;
   if (strlen(btDeviceName) > 0) {
     // Auto-disarm the forget confirmation if the window has elapsed,
     // same pattern as WiFi's forget-network and Factory Reset.
@@ -1662,7 +1670,7 @@ void drawBtScanScreen() {
                COLOR_MUTED, btHeadphonesMode);
     drawButton(btnForgetBt, btForgetArmed ? "Tap again to forget" : "Forget This Device",
                btForgetArmed ? COLOR_DANGER : COLOR_MUTED, btForgetArmed);
-    gridStartY = 138;
+    gridStartY = 154;
   }
 
   int count = audio_btScanResultCount();
@@ -1777,7 +1785,7 @@ void drawCustomFreqScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Custom Frequency", 20, 6);
+  tft.drawString("Custom Frequency", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -1802,7 +1810,7 @@ void drawCustomFreqScreen() {
   drawButton(btnCfSine, "Sine", 0xFFFF, customFreqWave == WAVE_SINE);
   drawButton(btnCfStart, "Start", customFreqLen > 0 ? COLOR_GOOD : COLOR_MUTED, customFreqLen > 0);
 
-  int gx = 220, gy = 48, cellW = 70, cellH = 44, gap = 8; // gy=48 clears the enlarged Home button (ends y=44)
+  int gx = 220, gy = 56, cellW = 70, cellH = 44, gap = 8; // gy=48 clears the enlarged Home button (ends y=44)
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 3; c++) {
       int idx = r * 3 + c;
@@ -1899,7 +1907,7 @@ void drawUpdateScreen() {
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Check for Updates", 20, 8);
+  tft.drawString("Check for Updates", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
@@ -2004,10 +2012,10 @@ void handleUpdateTouch(int x, int y) {
 // Screen: category picker
 // ---------------------------------------------------------------------
 Rect catButtonRects[CATEGORY_COUNT];
-Rect btnFavorites = {20, 40, 220, 48};
-Rect btnSettings = {260, 40, 200, 48};
-Rect btnCustomFreq   = {20, 274, 220, 40};
-Rect btnSequences    = {260, 274, 200, 40};
+Rect btnFavorites = {20, 50, 220, 42};
+Rect btnSettings = {260, 50, 200, 42};
+Rect btnCustomFreq   = {20, 258, 220, 42};
+Rect btnSequences    = {260, 258, 200, 42};
 bool viewingFavorites = false;
 // pendingSequenceIndex declared earlier (near the other mode flags) - see note there.
 
@@ -2046,7 +2054,7 @@ void drawCategoryScreen() {
   drawButtonFast(btnFavorites, "* Favorites", COLOR_MUTED);
   drawButton(btnSettings, "Settings", COLOR_MUTED);
 
-  int colW = 220, rowH = 48, gapX = 20, gapY = 10;
+  int colW = 220, rowH = 44, gapX = 20, gapY = 8;
   for (int i = 0; i < CATEGORY_COUNT; i++) {
     int col = i % 2, row = i / 2;
     Rect r = {20 + col * (colW + gapX), 100 + row * (rowH + gapY), colW, rowH};
@@ -2164,7 +2172,7 @@ void drawSequencesScreen() {
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Harmonics", 20, 8);
+  tft.drawString("Harmonics", 20, 12);
   drawHomeButton();
 
   int totalSeqPages = (NUM_SEQUENCES + SEQUENCES_PER_PAGE - 1) / SEQUENCES_PER_PAGE;
@@ -2177,7 +2185,7 @@ void drawSequencesScreen() {
     tft.setFreeFont(FONT_SM);
     tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 460, 16);
+    tft.drawString(pageBuf, 348, 20);
     tft.setTextDatum(TL_DATUM);
   }
 
@@ -2294,7 +2302,7 @@ void drawSoundscapesScreen() {
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(soundscapesOrigin == SCR_RUN ? "Pick a Sound" : "Soundscapes", 20, 8);
+  tft.drawString(soundscapesOrigin == SCR_RUN ? "Pick a Sound" : "Soundscapes", 20, 12);
   drawHomeButton();
 
   int count = sdmedia_soundscapeCount();
@@ -2305,7 +2313,7 @@ void drawSoundscapesScreen() {
     tft.setFreeFont(FONT_SM);
     tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
     tft.setTextDatum(TR_DATUM);
-    tft.drawString(pageBuf, 355, 16);
+    tft.drawString(pageBuf, 348, 20);
     tft.setTextDatum(TL_DATUM);
   }
 
@@ -2392,7 +2400,7 @@ void drawListScreen() {
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  drawFittedText(20, 8, 330, viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], FONT_XL, TFT_WHITE, COLOR_BG);
+  drawFittedText(20, 12, 320, viewingFavorites ? "Favorites" : CATEGORY_NAMES[currentCategory], FONT_XL, TFT_WHITE, COLOR_BG);
   drawHomeButton();
 
   int total = listCount();
@@ -2474,9 +2482,9 @@ Rect btnSoundMode     = {20, 152, 220, 44};
 Rect btnPickSound     = {20, 204, 220, 44};
 Rect btnBackFromRun   = {20, 256, 220, 44};
 
-Stepper powerStepper  = {"Power",  260, 70, 10, 1, 100, 1, formatPercentValue};
-Stepper timerStepper  = {"Session timer", 260, 142, 30, 0, 60, 5, formatTimerValue};
-Stepper volumeStepper = {"Volume", 260, 214, 60, 0, 100, 5, formatPercentValue};
+Stepper powerStepper  = {"Power",  260, 80, 10, 1, 100, 1, formatPercentValue};
+Stepper timerStepper  = {"Session timer", 260, 148, 30, 0, 60, 5, formatTimerValue};
+Stepper volumeStepper = {"Volume", 260, 216, 60, 0, 100, 5, formatPercentValue};
 
 unsigned long sessionStartMillis = 0;
 bool sessionTimerArmed = false;
@@ -2603,7 +2611,20 @@ const char* soundModeLabel(char* buf, size_t len) {
 
 void outputStatusText(char* buf, size_t len) {
   if (audioUsingBluetooth()) {
-    snprintf(buf, len, audio_btIsConnected() ? "BT: connected" : "BT: connecting...");
+    // Once a second: is the BT stack actually pulling audio, and is it silent?
+    static uint32_t lastFrames = 0;
+    static unsigned long lastCheck = 0;
+    static bool flowing = false;
+    if (millis() - lastCheck >= 900) {
+      uint32_t fr = audio_btFramesSent();
+      flowing = (fr != lastFrames);
+      lastFrames = fr;
+      lastCheck = millis();
+    }
+    if (!audio_btIsConnected()) snprintf(buf, len, "BT: connecting...");
+    else if (!flowing) snprintf(buf, len, "BT: connected, no data");
+    else if (audio_getSource() != AUDIO_SRC_OFF && audio_btLastPeak() == 0) snprintf(buf, len, "BT: streaming (silent)");
+    else snprintf(buf, len, "BT: streaming");
   } else {
     snprintf(buf, len, audio_speakerReady() ? "Out: onboard speaker" : "Speaker driver failed");
   }
@@ -2659,12 +2680,13 @@ void drawRunScreen() {
   // Dark panels behind the text areas keep everything readable while the
   // splash still shows around them. (Free fonts don't paint their own
   // background, so text straight over the image is hard to read.)
-  tft.fillRoundRect(8, 2, 246, 94, 12, COLOR_BG);    // title / frequency / category
-  tft.fillRoundRect(250, 46, 226, 270, 12, COLOR_BG); // steppers + status
+  tft.fillRoundRect(10, 6, 244, 92, 12, COLOR_BG);    // title / frequency / category
+  tft.fillRoundRect(250, 52, 222, 262, 12, COLOR_BG); // steppers + status
+  drawHomeButton();
 
   tft.setFreeFont(FONT_LG);
   const GFXfont* titleFont = (tft.textWidth(selName) <= 120) ? FONT_LG : FONT_SM;
-  drawFittedText(20, 8, 120, selName, titleFont, TFT_WHITE, COLOR_BG);
+  drawFittedText(20, 12, 120, selName, titleFont, TFT_WHITE, COLOR_BG);
 
   char buf[48];
   snprintf(buf, sizeof(buf), "%s - %s", selWave == WAVE_SQUARE ? "Square" : "Sine", selCategoryName);
@@ -2841,6 +2863,121 @@ void refreshScreen(Screen s) {
 }
 
 // ---------------------------------------------------------------------
+// Touch calibration with targets INSET from the edges, so it works with
+// a bezel covering the screen border. (The library's built-in routine
+// puts its arrows in the extreme corners - under the bezel.) The raw
+// readings at the four inset targets are extended out to the screen
+// edges, producing the exact same calibration format tft.setTouch() uses.
+// ---------------------------------------------------------------------
+static const int CAL_INSET = 48;
+
+static void drawCalTarget(int x, int y, uint16_t color) {
+  tft.drawCircle(x, y, 14, color);
+  tft.drawCircle(x, y, 13, color);
+  tft.drawFastHLine(x - 22, y, 45, color);
+  tft.drawFastVLine(x, y - 22, 45, color);
+}
+
+// Waits for a firm press, averages 8 raw readings, then waits for release.
+static void readCalPoint(int32_t& rx, int32_t& ry) {
+  const uint16_t Z_MIN = 350;
+  while (tft.getTouchRawZ() > Z_MIN) delay(10); // release from any previous press
+  delay(150);
+  int32_t sx = 0, sy = 0;
+  int n = 0;
+  while (n < 8) {
+    if (tft.getTouchRawZ() > Z_MIN) {
+      uint16_t x, y;
+      tft.getTouchRaw(&x, &y);
+      sx += x; sy += y; n++;
+      delay(15);
+    } else {
+      n = 0; sx = 0; sy = 0; // finger lifted mid-sample - start this point over
+      delay(10);
+    }
+  }
+  rx = sx / 8; ry = sy / 8;
+  while (tft.getTouchRawZ() > Z_MIN) delay(10);
+}
+
+void runTouchCalibration() {
+  const int W = tft.width(), H = tft.height(), M = CAL_INSET;
+  // Same order as the library: top-left, bottom-left, top-right, bottom-right
+  const int px[4] = { M, M, W - 1 - M, W - 1 - M };
+  const int py[4] = { M, H - 1 - M, M, H - 1 - M };
+  int32_t v[8];
+
+  for (int i = 0; i < 4; i++) {
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.setFreeFont(FONT_SM);
+    tft.drawString("Touch Setup", W / 2, H / 2 - 22);
+    tft.setTextColor(COLOR_TEXT_DIM, TFT_BLACK);
+    tft.drawString("Press and hold the center of the target", W / 2, H / 2 + 4);
+    char step[16];
+    snprintf(step, sizeof(step), "%d of 4", i + 1);
+    tft.drawString(step, W / 2, H / 2 + 28);
+    drawCalTarget(px[i], py[i], TFT_WHITE);
+    readCalPoint(v[i * 2], v[i * 2 + 1]);
+    drawCalTarget(px[i], py[i], TFT_GREEN);
+    delay(250);
+  }
+
+  // Which raw axis follows screen X? TL->BL moves along screen Y, so if raw
+  // X changed more than raw Y there, the axes are swapped.
+  bool rotate = abs(v[0] - v[2]) > abs(v[1] - v[3]);
+  float nearX, farX, nearY, farY;
+  if (!rotate) {
+    nearX = (v[0] + v[2]) / 2.0f; farX = (v[4] + v[6]) / 2.0f;
+    nearY = (v[1] + v[5]) / 2.0f; farY = (v[3] + v[7]) / 2.0f;
+  } else {
+    nearX = (v[1] + v[3]) / 2.0f; farX = (v[5] + v[7]) / 2.0f;
+    nearY = (v[0] + v[4]) / 2.0f; farY = (v[2] + v[6]) / 2.0f;
+  }
+  // Extend from the inset targets out to pixel 0 and pixel W/H.
+  float sx = (farX - nearX) / (float)(W - 1 - 2 * M);
+  float sy = (farY - nearY) / (float)(H - 1 - 2 * M);
+  float x0 = nearX - M * sx, x1 = nearX + (W - M) * sx;
+  float y0 = nearY - M * sy, y1 = nearY + (H - M) * sy;
+
+  bool invX = false, invY = false;
+  if (x0 > x1) { float t = x0; x0 = x1; x1 = t; invX = true; }
+  if (y0 > y1) { float t = y0; y0 = y1; y1 = t; invY = true; }
+  if (x0 < 1) x0 = 1;
+  if (y0 < 1) y0 = 1;
+
+  uint16_t cal[5];
+  cal[0] = (uint16_t)x0;
+  cal[1] = (uint16_t)max(1.0f, x1 - x0);
+  cal[2] = (uint16_t)y0;
+  cal[3] = (uint16_t)max(1.0f, y1 - y0);
+  cal[4] = (rotate ? 1 : 0) | (invX ? 2 : 0) | (invY ? 4 : 0);
+  tft.setTouch(cal);
+
+  Preferences p;
+  p.begin("tftcal", false);
+  p.putBytes("calInset", cal, sizeof(cal));
+  p.end();
+
+  // Quick check so the person can see it worked before continuing
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_SM);
+  tft.drawString("Done! Tap anywhere to test - a dot", W / 2, 120);
+  tft.drawString("should appear under your finger.", W / 2, 144);
+  tft.setTextColor(COLOR_TEXT_DIM, TFT_BLACK);
+  tft.drawString("(continues in 6 seconds)", W / 2, 180);
+  unsigned long start = millis();
+  while (millis() - start < 6000) {
+    uint16_t tx, ty;
+    if (tft.getTouch(&tx, &ty)) tft.fillCircle(tx, ty, 4, TFT_GREEN);
+    delay(15);
+  }
+}
+
+// ---------------------------------------------------------------------
 // Setup / loop
 // ---------------------------------------------------------------------
 Screen lastDrawnScreen = SCR_WELCOME;
@@ -2876,30 +3013,22 @@ void setup() {
   }
   Serial.printf("Soundscapes found: %d\n", sdmedia_scanSoundscapes());
 
-  // Touch calibration (tied to rotation)
-  static const uint8_t CURRENT_ROTATION = 1;
+  // Touch calibration. Uses its own "calInset" key so every unit re-runs
+  // the new bezel-friendly calibration once. Holding a finger on the
+  // screen during the splash also forces a recalibration.
   uint16_t calData[5];
   Preferences prefs;
-  prefs.begin("tftcal", false);
-  bool haveValidCal = false;
-  if (prefs.isKey("calData") && prefs.isKey("calRotation")) {
-    if (prefs.getUChar("calRotation", 255) == CURRENT_ROTATION) {
-      prefs.getBytes("calData", calData, sizeof(calData));
-      tft.setTouch(calData);
-      haveValidCal = true;
-    }
-  }
-  if (!haveValidCal) {
-    splashOnScreen = false;
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("Touch each corner as it appears", 240, 150, 2);
-    tft.calibrateTouch(calData, TFT_WHITE, TFT_BLACK, 15);
-    prefs.putBytes("calData", calData, sizeof(calData));
-    prefs.putUChar("calRotation", CURRENT_ROTATION);
-  }
+  prefs.begin("tftcal", true);
+  bool haveValidCal = prefs.isKey("calInset");
+  if (haveValidCal) prefs.getBytes("calInset", calData, sizeof(calData));
   prefs.end();
+  bool forceCal = tft.getTouchRawZ() > 350;
+  if (haveValidCal && !forceCal) {
+    tft.setTouch(calData);
+  } else {
+    splashOnScreen = false;
+    runTouchCalibration();
+  }
 
   loadPeople();
   loadFavorites();
