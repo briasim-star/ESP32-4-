@@ -50,7 +50,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.3.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.3.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -553,6 +553,34 @@ void drawFittedText(int x, int y, int maxW, const char* text, const GFXfont* fon
   }
   tft.drawString(buf, x, y);
 }
+
+// Word-wraps text to fit maxW, one line every lineH pixels. Returns the y
+// just below the last line drawn.
+int drawWrappedText(int x, int y, int maxW, const char* text, const GFXfont* font, uint16_t color, uint16_t bg, int lineH) {
+  tft.setFreeFont(font);
+  tft.setTextColor(color, bg);
+  tft.setTextDatum(TL_DATUM);
+  char line[64] = "";
+  const char* p = text;
+  while (*p) {
+    const char* wordEnd = p;
+    while (*wordEnd && *wordEnd != ' ') wordEnd++;
+    char trial[64];
+    snprintf(trial, sizeof(trial), "%s%s%.*s", line, line[0] ? " " : "", (int)(wordEnd - p), p);
+    if (line[0] && tft.textWidth(trial) > maxW) {
+      tft.drawString(line, x, y);
+      y += lineH;
+      snprintf(line, sizeof(line), "%.*s", (int)(wordEnd - p), p);
+    } else {
+      strncpy(line, trial, sizeof(line) - 1);
+      line[sizeof(line) - 1] = 0;
+    }
+    p = *wordEnd ? wordEnd + 1 : wordEnd;
+  }
+  if (line[0]) { tft.drawString(line, x, y); y += lineH; }
+  return y;
+}
+
 void drawHomeButton() {
   drawButtonFast(btnHome, "Home", COLOR_MUTED);
 }
@@ -650,7 +678,7 @@ void drawWelcomeScreen() {
 
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_WARN, COLOR_BG);
-  tft.drawString("Wellness device - not a medical device", 20, 30);
+  tft.drawString("Wellness device - not a medical device", 20, 38);
 
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   const char* lines[] = {
@@ -661,7 +689,7 @@ void drawWelcomeScreen() {
     "insulin pump, or other implanted",
     "electronic device, or if pregnant."
   };
-  int y = 54;
+  int y = 60;
   for (int i = 0; i < 6; i++) {
     tft.drawString(lines[i], 20, y);
     y += 19;
@@ -835,13 +863,13 @@ void drawManagePeopleScreen() {
 
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  tft.drawString("Tap a name twice to remove them.", 20, 36);
+  tft.drawString("Tap a name twice to remove them.", 20, 46);
 
   if (personToRemove >= 0 && millis() - personRemoveArmedAt > 5000) {
     personToRemove = -1; // auto-disarm after the confirm window elapses
   }
 
-  int colW = 220, rowH = 80, gapX = 20, gapY = 16, startY = 62;
+  int colW = 220, rowH = 78, gapX = 20, gapY = 12, startY = 72;
   for (int i = 0; i < MAX_PEOPLE; i++) {
     int col = i % 2, row = i / 2;
     Rect r = {20 + col * (colW + gapX), startY + row * (rowH + gapY), colW, rowH};
@@ -996,7 +1024,7 @@ Rect btnKbSpace, btnKbBackspace, btnKbOk;
 
 void layoutKeyboard() {
   kbKeyCount = 0;
-  int y = 62, rowH = 32, gap = 3;
+  int y = 74, rowH = 32, gap = 3;
 
   const char* rows[4] = { KB_ROW1, KB_ROW2, KB_ROW3, KB_ROW4 };
   for (int r = 0; r < 4; r++) {
@@ -1036,9 +1064,9 @@ void drawTextEntryScreen() {
 
   char shown[24];
   formatDisplayName(textEntryBuf, shown, sizeof(shown));
-  tft.fillRect(20, 26, 440, 30, COLOR_PANEL);
-  tft.drawRect(20, 26, 440, 30, COLOR_ACCENT);
-  drawFittedText(30, 32, 420, textEntryLen > 0 ? shown : "-", FONT_LG, TFT_WHITE, COLOR_PANEL);
+  tft.fillRect(20, 36, 440, 32, COLOR_PANEL);
+  tft.drawRect(20, 36, 440, 32, COLOR_ACCENT);
+  drawFittedText(30, 42, 420, textEntryLen > 0 ? shown : "-", FONT_LG, TFT_WHITE, COLOR_PANEL);
 
   layoutKeyboard();
   for (int i = 0; i < kbKeyCount; i++) {
@@ -1153,7 +1181,7 @@ bool pinWrongFlash = false;
 // same forward-declaration reason described there.
 
 Rect pinKeyRects[12];
-Rect pinCancelBtn = {20, 200, 180, 46};
+Rect pinCancelBtn = {20, 200, 200, 46};
 const char* PIN_KEY_LABELS[12] = {"1","2","3","4","5","6","7","8","9","<","0","OK"};
 
 void startPinEntry(PinPurpose purpose) {
@@ -1173,13 +1201,14 @@ void drawPinScreen() {
   const char* title = (pinPurpose == PIN_DEV_MODE) ? "Developer Mode PIN" :
                       (pinPurpose == PIN_SET_LOGIN) ? "Set Login Password" :
                                                        "Enter Login Password";
-  tft.drawString(title, 20, 16);
+  const GFXfont* titleFont = (tft.textWidth(title) <= 226) ? FONT_LG : FONT_SM;
+  drawFittedText(20, 16, 226, title, titleFont, TFT_WHITE, COLOR_BG);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   const char* subtitle = (pinPurpose == PIN_DEV_MODE) ? "Required to exceed the 45% ceiling" :
                          (pinPurpose == PIN_SET_LOGIN) ? "Choose a PIN staff will use to log in" :
                                                           "Staff PIN required to use this device";
-  tft.drawString(subtitle, 20, 44);
+  drawWrappedText(20, 48, 226, subtitle, FONT_SM, COLOR_TEXT_DIM, COLOR_BG, 20);
 
   char mask[11] = "";
   for (int i = 0; i < pinLen; i++) {
@@ -1193,10 +1222,10 @@ void drawPinScreen() {
   mask[pinLen] = 0;
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(pinWrongFlash ? COLOR_DANGER : TFT_WHITE, COLOR_BG);
-  tft.drawString(pinLen > 0 ? mask : "-", 20, 78);
+  tft.drawString(pinLen > 0 ? mask : "-", 20, 104);
   pinWrongFlash = false;
 
-  int gx = 220, gy = 24, cellW = 70, cellH = 44, gap = 8;
+  int gx = 256, gy = 24, cellW = 64, cellH = 44, gap = 8; // right column; left column stays clear for the title
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 3; c++) {
       int idx = r * 3 + c;
@@ -1271,6 +1300,7 @@ void relockDevMode() {
 // Screen: Settings
 // ---------------------------------------------------------------------
 
+bool restartAfterWifiSetup = false; // set when Bluetooth had to be shut down for the WiFi setup page
 bool factoryResetArmed = false;
 bool wifiForgetArmed = false;
 unsigned long wifiForgetArmedAt = 0;
@@ -1447,6 +1477,11 @@ void handleSettingsItemTap(SettingsItemId id) {
           screen = SCR_SETTINGS;
         }
       } else {
+        // The WiFi setup page (its own hotspot + web page) needs the memory
+        // Bluetooth is holding - free it first. If Bluetooth was running,
+        // the device restarts when setup finishes so Bluetooth comes back.
+        audio_setSource(AUDIO_SRC_OFF);
+        if (audio_btStarted()) { audio_btEnd(true); restartAfterWifiSetup = true; }
         wifitime_beginSetupPortal();
         screen = SCR_WIFI_SETUP;
       }
@@ -1496,7 +1531,7 @@ void drawSettingsScreen() {
   } else {
     snprintf(tierBuf, sizeof(tierBuf), "%s", HW_TIER_NAME);
   }
-  drawFittedText(20, 34, 340, tierBuf, FONT_SM, COLOR_TEXT_DIM, COLOR_BG); // constrained so a long name can't run into the Home button
+  drawFittedText(20, 50, 330, tierBuf, FONT_SM, COLOR_TEXT_DIM, COLOR_BG); // constrained so a long name can't run into the Home button
 
   drawHomeButton();
 
@@ -1525,7 +1560,7 @@ void drawSettingsScreen() {
       uint16_t color;
       bool active;
       getSettingsItemDisplay(settingsVisibleItems[idx], label, sizeof(label), &color, &active);
-      drawButton(r, label, color, active);
+      drawButtonFast(r, label, color, active); // smaller font so long labels fit
     }
   }
 
@@ -1584,6 +1619,7 @@ void drawWifiSetupScreen() {
 void handleWifiSetupTouch(int x, int y) {
   if (touchInRect(x, y, btnWifiCancel)) {
     wifitime_cancelPortal();
+    if (restartAfterWifiSetup) ESP.restart(); // brings Bluetooth back
     screen = SCR_SETTINGS;
   }
 }
@@ -1692,7 +1728,7 @@ void drawBtScanScreen() {
       drawButtonFast(r, audio_btScanResultName(i));
     }
   }
-  if (count > 6) {
+  if (count > 6 && gridStartY < 150) {
     tft.drawString("More devices found - power off nearby", 20, gridStartY + 152);
     tft.drawString("ones you don't want to narrow it down.", 20, gridStartY + 172);
   }
@@ -1776,9 +1812,9 @@ static const int CUSTOM_FREQ_MAX_CHARS = 7; // e.g. "999.99" plus room
 
 Rect cfKeyRects[12];
 const char* CF_KEY_LABELS[12] = {"1","2","3","4","5","6","7","8","9",".","0","<"};
-Rect btnCfSquare = {20, 100, 85, 44};
-Rect btnCfSine   = {115, 100, 85, 44};
-Rect btnCfStart  = {20, 154, 180, 44};
+Rect btnCfSquare = {20, 112, 85, 44};
+Rect btnCfSine   = {115, 112, 85, 44};
+Rect btnCfStart  = {20, 166, 180, 44};
 
 void drawCustomFreqScreen() {
   tft.fillScreen(COLOR_BG);
@@ -1792,19 +1828,19 @@ void drawCustomFreqScreen() {
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   char rangeBuf[32];
   snprintf(rangeBuf, sizeof(rangeBuf), "Enter 1-%d Hz (decimals OK)", CUSTOM_FREQ_MAX);
-  tft.drawString(rangeBuf, 20, 34);
+  tft.drawString(rangeBuf, 20, 44);
 
   // Clear the FULL value-display area first, not just the new text's own
   // width - otherwise a shorter number typed after a longer one (or a
   // backspace) leaves stale digit remnants behind, which read as
   // garbled/cut-off text.
-  tft.fillRect(18, 52, 200, 40, COLOR_BG);
+  tft.fillRect(18, 62, 200, 44, COLOR_BG);
   char shown[20];
   snprintf(shown, sizeof(shown), "%s Hz", customFreqLen > 0 ? customFreqBuf : "-");
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString(shown, 20, 58);
+  tft.drawString(shown, 20, 68);
 
   drawButton(btnCfSquare, "Square", 0xFFFF, customFreqWave == WAVE_SQUARE);
   drawButton(btnCfSine, "Sine", 0xFFFF, customFreqWave == WAVE_SINE);
@@ -1914,7 +1950,7 @@ void drawUpdateScreen() {
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   char verBuf[32];
   snprintf(verBuf, sizeof(verBuf), "Current version: %s", FIRMWARE_VERSION);
-  tft.drawString(verBuf, 20, 40);
+  tft.drawString(verBuf, 20, 44);
   tft.drawString("Update over WiFi, or scan with", 20, 66);
   tft.drawString("your phone to install by cable:", 20, 86);
 
@@ -2498,7 +2534,10 @@ void handleListTouch(int x, int y) {
 // ---------------------------------------------------------------------
 Rect btnStartStop     = {20, 100, 220, 44};
 Rect btnFavToggle     = {145, 28, 95, 36};
-Rect btnSoundMode     = {20, 152, 220, 44};
+// Sound picker: three side-by-side choices, the active one lit up.
+Rect btnSndOff        = {20, 152, 62, 44};
+Rect btnSndTone       = {86, 152, 72, 44};
+Rect btnSndScape      = {162, 152, 78, 44};
 Rect btnPickSound     = {20, 204, 220, 44};
 Rect btnBackFromRun   = {20, 256, 220, 44};
 
@@ -2588,7 +2627,10 @@ void formatFreq(float f, char* buf, size_t len) {
 void syncAudio() {
   AudioSource src = AUDIO_SRC_OFF;
   int scapeIdx = -1;
-  bool sessionOn = waveform_isRunning() && !sessionPaused;
+  // Sound plays the whole time the session screen is open (and while
+  // picking a soundscape from it) - not only after START - so choosing a
+  // sound gives instant feedback. Leaving the session stops it.
+  bool sessionOn = (screen == SCR_RUN) || (screen == SCR_SOUNDSCAPES && soundscapesOrigin == SCR_RUN);
 
   if (sessionOn) {
     src = sessionSoundMode;
@@ -2731,12 +2773,27 @@ void refreshRunControls() {
   uint16_t startColor = sessionPaused ? COLOR_GOOD : running ? COLOR_WARN : COLOR_GOOD;
   drawButton(btnStartStop, startLabel, startColor);
 
-  char sndLabel[40];
-  drawButton(btnSoundMode, soundModeLabel(sndLabel, sizeof(sndLabel)), 0xFFFF, sessionSoundMode != AUDIO_SRC_OFF);
+  bool haveScapes = sdmedia_soundscapeCount() > 0;
+  drawButtonFast(btnSndOff,   "Off",  sessionSoundMode == AUDIO_SRC_OFF ? COLOR_PANEL_LIT : COLOR_PANEL, sessionSoundMode == AUDIO_SRC_OFF);
+  drawButtonFast(btnSndTone,  "Tone", sessionSoundMode == AUDIO_SRC_TONE ? COLOR_GOOD : COLOR_PANEL, sessionSoundMode == AUDIO_SRC_TONE);
+  drawButtonFast(btnSndScape, "Nature", !haveScapes ? COLOR_MUTED : sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? COLOR_GOOD : COLOR_PANEL,
+                 sessionSoundMode == AUDIO_SRC_SOUNDSCAPE);
 
-  if (sdmedia_soundscapeCount() > 0) {
-    drawButton(btnPickSound, "Pick Soundscape", COLOR_MUTED);
+  // Second row names what is actually playing, and is the way to change it.
+  char nowBuf[40];
+  if (sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && sessionSoundscapeIndex >= 0) {
+    char name[24];
+    prettySoundName(sessionSoundscapeIndex, name, sizeof(name));
+    snprintf(nowBuf, sizeof(nowBuf), "%s  - change", name);
+  } else if (sessionSoundMode == AUDIO_SRC_TONE) {
+    char f[16];
+    formatFreq(liveFrequency(), f, sizeof(f));
+    snprintf(nowBuf, sizeof(nowBuf), "Tone matched to %s", f);
+  } else {
+    snprintf(nowBuf, sizeof(nowBuf), "Sound off");
   }
+  bool pickable = haveScapes && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE;
+  drawButtonFast(btnPickSound, nowBuf, pickable ? COLOR_PANEL_LIT : COLOR_BG, pickable);
   drawButton(btnBackFromRun, "Stop & Back", COLOR_MUTED);
 
   powerStepper.value = powerDisplay;
@@ -2825,11 +2882,15 @@ void handleRunTouch(int x, int y) {
     }
     return;
   }
-  if (touchInRect(x, y, btnSoundMode)) {
-    cycleSoundMode();
+  if (touchInRect(x, y, btnSndOff))  { sessionSoundMode = AUDIO_SRC_OFF;  saveSetupInfo(); return; }
+  if (touchInRect(x, y, btnSndTone)) { sessionSoundMode = AUDIO_SRC_TONE; saveSetupInfo(); return; }
+  if (sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnSndScape)) {
+    sessionSoundMode = AUDIO_SRC_SOUNDSCAPE;
+    if (sessionSoundscapeIndex < 0) sessionSoundscapeIndex = defaultSoundscapeFor(selCategoryName, selFreq);
+    saveSetupInfo();
     return;
   }
-  if (sdmedia_soundscapeCount() > 0 && touchInRect(x, y, btnPickSound)) {
+  if (sdmedia_soundscapeCount() > 0 && sessionSoundMode == AUDIO_SRC_SOUNDSCAPE && touchInRect(x, y, btnPickSound)) {
     soundscapesOrigin = SCR_RUN;
     if (sessionSoundscapeIndex >= 0) soundscapesPage = sessionSoundscapeIndex / SOUNDSCAPES_PER_PAGE;
     screen = SCR_SOUNDSCAPES; // the session keeps running while picking
@@ -3074,6 +3135,7 @@ void loop() {
       tft.setTextDatum(MC_DATUM);
       tft.drawString(wifitime_isConfigured() ? "WiFi connected!" : "Setup timed out - try again.", 240, 160);
       delay(1500);
+      if (restartAfterWifiSetup) ESP.restart(); // brings Bluetooth back
       screen = SCR_SETTINGS;
       fullRedrawRequested = true;
     }
