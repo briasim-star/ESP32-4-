@@ -601,7 +601,7 @@ void drawTopBar(const char* title, bool showBack, bool showHome = false) {
   tft.setFreeFont(FONT_LG);
   const GFXfont* f = (tft.textWidth(t) <= 240) ? FONT_LG : FONT_SM;
   drawFittedText(56, f == FONT_LG ? 8 : 12, 240, t, f, MADD_TEXT, MADD_PANEL);
-  if (showHome) drawChamferButton(btnHome, "Home", MADD_PANEL, MADD_EDGE, MADD_TEXT);
+  if (showHome) drawChamferButton(Rect{358, 10, 106, 38}, "Home", MADD_PANEL, MADD_EDGE, MADD_TEXT); // same spot as btnHome (declared further down)
   else drawTopStatus(true);
   drawSpectrumStripe(38);
 }
