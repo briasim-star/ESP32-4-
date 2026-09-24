@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.7.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -2914,6 +2914,7 @@ int completedMinutes = 0;
 float completedFreq = 0;
 const char* completedName = "";
 extern bool fullRedrawRequested;
+extern bool cymaticsView; // defined with the Cymatics view further down
 
 void markSessionComplete(int mins) {
   completedMinutes = mins;
@@ -2937,7 +2938,8 @@ void beginSessionNow() {
   sessionStartMillis = millis();
   sessionTimerArmed = (timerMinutes > 0);
   audio_chime(660.0f, 700);  // brighter bell = "starting"
-  runControlsDirty = true;
+  cymaticsView = true;       // the sand plate comes alive as the session begins
+  fullRedrawRequested = true;
 }
 
 void updateProgram() {
@@ -3090,7 +3092,95 @@ void drawRunCoils(bool bright) {
   tft.drawEllipse(RUN_HEX_X, 233, 96, 15, b);
 }
 
+// =====================================================================
+// CYMATICS VIEW - a live "sand plate" (Chladni figure) for the session.
+// Real physics, visualised: on a vibrating plate, sand is shaken hardest
+// where the plate moves most and comes to rest on the still (nodal) lines,
+// drawing a geometric pattern. Each grain here jiggles in proportion to the
+// plate's motion at its spot, so the grains genuinely settle into the
+// pattern for the session's frequency - and re-form when a Journey changes
+// frequency. It is a visualisation of the frequency, not a field measurement.
+// RAM: 320 grains x 4 bytes = 1.3 KB (kept small - Bluetooth needs the RAM).
+// =====================================================================
+bool cymaticsView = false;
+static const int CYM_N = 320;
+static const int CYM_R = 80;
+static int16_t cymX[CYM_N], cymY[CYM_N];
+static uint32_t cymRng = 0x9E3779B9u;
+static int cymModeN = 1, cymModeM = 2;
+static int cymFrame = 0;
+
+static inline int cymRand(int span) {
+  cymRng ^= cymRng << 13; cymRng ^= cymRng >> 17; cymRng ^= cymRng << 5;
+  return (int)(cymRng % (uint32_t)(2 * span + 1)) - span;
+}
+
+// Session frequency -> plate mode (n, m). Higher frequency = more intricate figure.
+static void cymaticsModeFor(float hz, int& n, int& m) {
+  static const uint8_t pairs[12][2] = {{1,2},{1,3},{2,3},{1,4},{2,5},{3,4},{1,5},{3,5},{2,7},{4,5},{3,7},{5,6}};
+  if (hz < 0.5f) hz = 0.5f;
+  float t = logf(hz / 0.5f) / logf(2000.0f); // 0.5 Hz -> 0 ... 1 kHz -> 1
+  int k = (int)(t * 12.0f);
+  if (k < 0) k = 0;
+  if (k > 11) k = 11;
+  n = pairs[k][0];
+  m = pairs[k][1];
+}
+
+// Chladni plate displacement for mode (n, m) at x, y in -1..1.
+static inline float chladni(float x, float y) {
+  const float P = 3.14159265f;
+  return cosf(cymModeN * P * x) * cosf(cymModeM * P * y) - cosf(cymModeM * P * x) * cosf(cymModeN * P * y);
+}
+
+void drawCymaticsPlate() {
+  tft.fillCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 4, MADD_PANEL);
+  tft.drawCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 5, MADD_MAGENTA);
+  tft.drawCircle(RUN_HEX_X, RUN_HEX_Y, CYM_R + 6, MADD_MAGENTA);
+  for (int i = 0; i < CYM_N; i++) { // sprinkle the sand evenly
+    int x, y;
+    do { x = cymRand(CYM_R); y = cymRand(CYM_R); } while (x * x + y * y > CYM_R * CYM_R);
+    cymX[i] = x; cymY[i] = y;
+    tft.drawPixel(RUN_HEX_X + x, RUN_HEX_Y + y, MADD_CYAN);
+  }
+}
+
+void updateCymatics() {
+  static unsigned long last = 0;
+  if (millis() - last < 40) return; // ~25 frames a second
+  last = millis();
+  cymaticsModeFor(liveFrequency(), cymModeN, cymModeM);
+  if (!waveform_isRunning()) return; // sand rests while the coil is off
+  bool redrawAll = (++cymFrame % 12) == 0; // restore grains a neighbour may have erased
+  for (int i = 0; i < CYM_N; i++) {
+    float v = fabsf(chladni(cymX[i] / (float)CYM_R, cymY[i] / (float)CYM_R)); // 0..2
+    int step = (int)(v * 4.0f);
+    uint16_t c = v < 0.3f ? MADD_TEXT : MADD_CYAN; // settled grains glow white
+    if (step > 0) {
+      int nx = cymX[i] + cymRand(step), ny = cymY[i] + cymRand(step);
+      if (nx * nx + ny * ny <= CYM_R * CYM_R) {
+        tft.drawPixel(RUN_HEX_X + cymX[i], RUN_HEX_Y + cymY[i], MADD_PANEL);
+        cymX[i] = nx; cymY[i] = ny;
+        tft.drawPixel(RUN_HEX_X + nx, RUN_HEX_Y + ny, c);
+        continue;
+      }
+    }
+    if (redrawAll) tft.drawPixel(RUN_HEX_X + cymX[i], RUN_HEX_Y + cymY[i], c);
+  }
+}
+
 void drawRunHexContents(const char* timeText, const char* freqText) {
+  if (cymaticsView) { // time + frequency sit under the plate instead
+    fillAurora(14, 229, 214, 24);
+    char line[48];
+    snprintf(line, sizeof(line), "%s   %s", timeText, freqText);
+    tft.setTextDatum(TC_DATUM);
+    tft.setFreeFont(FONT_SM);
+    tft.setTextColor(MADD_TEXT);
+    tft.drawString(line, RUN_HEX_X, 233);
+    tft.setTextDatum(TL_DATUM);
+    return;
+  }
   drawHex(RUN_HEX_X, RUN_HEX_Y, RUN_HEX_R, MADD_PANEL, MADD_MAGENTA);
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(FONT_LG);
@@ -3146,7 +3236,8 @@ void drawRunScreen() {
   prepareSessionAudioIfNew();
   drawAuroraBackground();
   drawTopBar(selName, true);
-  drawRunCoils(true);
+  if (cymaticsView) drawCymaticsPlate();
+  else drawRunCoils(true);
   drawChamfer(runPanel, MADD_PANEL, MADD_EDGE, 12);
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(MADD_DIM);
@@ -3254,6 +3345,7 @@ void refreshRunControls() {
 
 // Pulses the coil rings in step with the session (visible up to ~4 Hz).
 void updateRunPulse() {
+  if (cymaticsView) { updateCymatics(); return; }
   static bool lastBright = true;
   bool bright = true;
   if (waveform_isRunning()) {
@@ -3270,6 +3362,7 @@ void updateRunPulse() {
 }
 
 void endSession() {
+  cymaticsView = false; // next visit opens on the timer view
   startCountdownAt = 0; // cancel a 3-2-1 in progress
   rampStartMs = 0;
   if (sessionForceSpeaker) { sessionForceSpeaker = false; applyAudioOutput(); } // back to the Bluetooth speaker
@@ -3286,6 +3379,12 @@ void endSession() {
 void handleRunTouch(int x, int y) {
   if (sessionCompleteShow) { // any tap closes the summary card
     sessionCompleteShow = false;
+    fullRedrawRequested = true;
+    return;
+  }
+  // Tap the plate / hexagon to switch between the Cymatics view and the timer view.
+  if (x >= 20 && x <= 205 && y >= 56 && y <= 250) {
+    cymaticsView = !cymaticsView;
     fullRedrawRequested = true;
     return;
   }

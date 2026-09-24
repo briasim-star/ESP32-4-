@@ -527,10 +527,9 @@ static void btService() {
   // (Calling connect_to() at other times breaks audio - see bt_audio notes.)
   if (!btQuickConnectDone && millis() - btAttemptStartMs > 1500) {
     btQuickConnectDone = true;
-    if (!a2dp.is_connected() && a2dp.has_last_connection()) {
+    if (!a2dp.is_connected() && btSavedAddrValid) { // our own saved copy of the speaker's address
       Serial.printf("[BT] quick retry at %lu ms\n", millis());
-      esp_bd_addr_t* last = a2dp.get_last_peer_address();
-      a2dp.connect_to(*last);
+      a2dp.connect_to(btSavedAddr);
     }
   }
 }
