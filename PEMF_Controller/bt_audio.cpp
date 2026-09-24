@@ -10,6 +10,7 @@
 #include <esp_gap_bt_api.h>
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
+#include <esp_avrc_api.h>
 #include <math.h>
 
 // ============================================================================
@@ -459,6 +460,11 @@ static void speakerQuiet() {
 // Bluetooth (A2DP source)
 // ---------------------------------------------------------------------------
 static BluetoothA2DPSource a2dp;
+// The library scales the audio it sends by the speaker's reported volume -
+// with a speaker that remembers a low level, that made our sound nearly
+// silent until the speaker was turned up by hand. Our own volume is applied
+// in renderFrames(), so the library's is switched off.
+static A2DPNoVolumeControl btNoVolume;
 static char btName[64] = "";
 static bool g_btStarted = false;
 static bool btVolumeSent = false;
@@ -548,6 +554,17 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
   return false;
 }
 
+// The speaker's OWN volume (0-127), sent straight over AVRCP. Our on-screen
+// volume shapes the sound itself; the speaker is kept near its top so the
+// two together behave like one control.
+static const uint8_t SPEAKER_VOLUME_TARGET = 120;
+static void sendSpeakerVolume(uint8_t v) {
+  static uint8_t tl = 5;
+  tl = (tl + 1) & 0x0F;
+  esp_err_t e = esp_avrc_ct_send_set_absolute_volume_cmd(tl, v);
+  Serial.printf("[BT] speaker volume -> %u (%s), speaker last reported %d\n", v, e == ESP_OK ? "sent" : "not sent", a2dp.get_volume());
+}
+
 static void btService() {
   if (!g_btStarted) return;
   // On each connection: ask the speaker to sit near its maximum (many
@@ -558,14 +575,19 @@ static void btService() {
   // which overrides ours (so sound only appeared after pressing the
   // speaker's volume-up). So: send at connect, again 2.5 s later once the
   // speaker has reported, and again whenever a sound starts playing.
+  // (The library's set_volume() only sends when the value CHANGES, so those
+  // repeats never reached the speaker - we send the command directly now.)
   static unsigned long connectedAt = 0;
-  static bool resent = false;
+  static int volStep = 0;
   static AudioSource lastSrc = AUDIO_SRC_OFF;
+  static const unsigned long VOL_SEND_AT[3] = {1000, 3000, 6000};
   if (a2dp.is_connected()) {
-    if (!btVolumeSent) { a2dp.set_volume(120); btVolumeSent = true; connectedAt = millis(); resent = false; }
-    if (!resent && millis() - connectedAt > 2500) { a2dp.set_volume(120); resent = true; }
+    if (!btVolumeSent) { btVolumeSent = true; connectedAt = millis(); volStep = 0; }
+    if (volStep < 3 && millis() - connectedAt > VOL_SEND_AT[volStep]) { sendSpeakerVolume(SPEAKER_VOLUME_TARGET); volStep++; }
     AudioSource src = g_source;
-    if (src != AUDIO_SRC_OFF && lastSrc == AUDIO_SRC_OFF) a2dp.set_volume(120);
+    // A sound is starting and the speaker is still sitting low (or never
+    // told us its level): bring it up so the sound is actually heard.
+    if (src != AUDIO_SRC_OFF && lastSrc == AUDIO_SRC_OFF && a2dp.get_volume() < 64) sendSpeakerVolume(SPEAKER_VOLUME_TARGET);
     lastSrc = src;
   } else {
     btVolumeSent = false;
@@ -713,6 +735,7 @@ void audio_btConnect() {
   a2dp.set_auto_reconnect(true); // library-native fast reconnect to the last device
   btAttemptStartMs = millis();
   btQuickConnectDone = false; // allow the one early retry in btService()
+  a2dp.set_volume_control(&btNoVolume); // never let the speaker's reported level turn OUR audio down
   Serial.printf("[BT] start at %lu ms\n", millis());
   // Same call the earlier (working) firmware used for Bluetooth tone output.
   a2dp.start(btName, btDataCallback); // returns quickly; the connection completes in the background
@@ -772,6 +795,7 @@ void audio_btStartScan() {
   a2dp.set_discovery_mode_callback(onDiscoveryModeChanged);
   a2dp.set_on_connection_state_changed(onBtConnectionState);
   a2dp.set_data_callback_in_frames(btDataCallback);
+  a2dp.set_volume_control(&btNoVolume);
   if (!g_btStarted) {
     a2dp.start(); // no name -> open discovery
     g_btStarted = true;
