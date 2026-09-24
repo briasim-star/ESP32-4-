@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.5.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.6.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -702,25 +702,28 @@ void drawFittedLabel(Rect r, const char* label, const GFXfont* font, uint16_t fi
   tft.drawString(buf, r.x + r.w / 2, r.y + r.h / 2); // last-resort fallback
 }
 
-void drawButton(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool active = false) {
+// Every older screen's buttons now use the MADD cut-corner style. The old
+// color names still mean the same thing: good = green, danger = red,
+// warn = amber, muted = plain panel, lit/active = cyan.
+void maddButtonColors(uint16_t fillColor, bool active, uint16_t& fill, uint16_t& edge) {
   if (fillColor == 0xFFFF) fillColor = active ? COLOR_PANEL_LIT : COLOR_PANEL;
-  int radius = min(r.w, r.h) / 2; // pill-shaped - fully rounded ends, not just softened corners
-  tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, fillColor);
-  // Double-drawn border reads as a deliberate frame rather than a thin outline
-  tft.drawRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_ACCENT);
-  tft.drawRoundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, radius - 1, COLOR_ACCENT);
-  drawFittedLabel(r, label, FONT_LG, fillColor);
+  if (fillColor == COLOR_GOOD)        { fill = tft.color565(12, 58, 40);  edge = COLOR_GOOD; }
+  else if (fillColor == COLOR_DANGER) { fill = tft.color565(58, 13, 26);  edge = MADD_SPECTRUM[2]; }
+  else if (fillColor == COLOR_WARN)   { fill = tft.color565(90, 54, 6);   edge = MADD_SPECTRUM[0]; }
+  else if (fillColor == COLOR_PANEL_LIT) { fill = tft.color565(12, 58, 68); edge = MADD_CYAN; }
+  else                                { fill = MADD_PANEL;                 edge = active ? MADD_CYAN : MADD_EDGE; }
 }
 
-// Same pill shape as drawButton() for visual consistency across the
-// whole UI (grids, lists, keypads used to look like sharp-cornered
-// squares next to the rounder buttons elsewhere - now unified).
+void drawButton(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool active = false) {
+  uint16_t fill, edge;
+  maddButtonColors(fillColor, active, fill, edge);
+  drawChamferButton(r, label, fill, edge, MADD_TEXT, FONT_LG);
+}
+
 void drawButtonFast(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool active = false) {
-  if (fillColor == 0xFFFF) fillColor = active ? COLOR_PANEL_LIT : COLOR_PANEL;
-  int radius = min(r.w, r.h) / 2;
-  tft.fillRoundRect(r.x, r.y, r.w, r.h, radius, fillColor);
-  tft.drawRoundRect(r.x, r.y, r.w, r.h, radius, COLOR_ACCENT);
-  drawFittedLabel(r, label, FONT_SM, fillColor);
+  uint16_t fill, edge;
+  maddButtonColors(fillColor, active, fill, edge);
+  drawChamferButton(r, label, fill, edge, MADD_TEXT, FONT_SM);
 }
 
 Rect btnHome = {358, 10, 106, 38}; // inset from the bezel
@@ -957,7 +960,7 @@ void handleWelcomeTouch(int x, int y) {
 Rect personPickerRects[MAX_PEOPLE];
 
 void drawPersonPickerScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1028,7 +1031,7 @@ void removePerson(int idx) {
 }
 
 void drawManagePeopleScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1100,7 +1103,7 @@ Rect btnHomeUse        = {20, 100, 220, 100};
 Rect btnWellnessCenter = {260, 100, 200, 100};
 
 void drawSetupModeScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1131,7 +1134,7 @@ Rect btnLoginYes = {20, 100, 220, 100};
 Rect btnLoginNo  = {260, 100, 200, 100};
 
 void drawSetupLoginChoiceScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1230,7 +1233,7 @@ void formatDisplayName(const char* raw, char* out, size_t outSize) {
 }
 
 void drawTextEntryScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1301,7 +1304,7 @@ Rect clientCheckboxRect = {20, 190, 40, 40};
 Rect btnClientContinue = {60, 250, 200, 48};
 
 void drawClientConfirmScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1368,7 +1371,7 @@ void startPinEntry(PinPurpose purpose) {
 // 12-key keypad. Split this way since landscape doesn't have the vertical
 // room for the keypad to sit below a lot of text the way portrait did.
 void drawPinScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1785,7 +1788,7 @@ Rect btnSetPrev = {20, 254, 220, 46};
 Rect btnSetNext = {260, 254, 200, 46};
 
 void drawSettingsScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_XL);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1871,7 +1874,7 @@ void handleSettingsTouch(int x, int y) {
 Rect btnWifiCancel = {150, 240, 180, 46};
 
 void drawWifiSetupScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(MC_DATUM);
@@ -1898,7 +1901,7 @@ void handleWifiSetupTouch(int x, int y) {
 // Screen: session log (last 5 sessions)
 // ---------------------------------------------------------------------
 void drawLogScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -1948,7 +1951,7 @@ unsigned long btPickAt = 0; // when a device was tapped in the scan list (0 = no
 bool scanRequested = false; // true the instant the button is tapped, before the BT stack actually starts discovering - gives immediate feedback instead of an unexplained gap
 
 void drawBtScanScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -2102,7 +2105,7 @@ Rect btnCfSine   = {115, 112, 85, 44};
 Rect btnCfStart  = {20, 166, 180, 44};
 
 void drawCustomFreqScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
@@ -2224,7 +2227,7 @@ bool otaUpdateAvailable = false;
 bool otaChecking = false;
 
 void drawUpdateScreen() {
-  tft.fillScreen(COLOR_BG);
+  drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
   tft.setTextDatum(TL_DATUM);
