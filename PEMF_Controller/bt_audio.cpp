@@ -466,7 +466,10 @@ static void btSaveAddr(const uint8_t* addr) {
 static void onBtConnectionState(esp_a2d_connection_state_t state, void*) {
   btConnState = state;
   btStatusChanges++;
-  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) btEverConnected = true;
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    btEverConnected = true;
+    Serial.printf("[BT] connected %lu ms after power-on\n", millis()); // USB log only - for timing
+  }
   if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) btAttemptStartMs = millis(); // library keeps retrying; restart the "not found" clock
 }
 

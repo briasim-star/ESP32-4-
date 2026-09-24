@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.6.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.6.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -3472,6 +3472,19 @@ void setup() {
   audio_begin();
   waveform_begin();
 
+  // Start Bluetooth as early as possible so it connects WHILE the splash is
+  // showing, instead of after everything else. Skipped when an update check
+  // is pending - that needs Bluetooth's memory, and starts it afterwards.
+  loadSetupInfo();
+  Preferences otaP;
+  otaP.begin("ota", true);
+  bool updatePending = otaP.getBool("pending", false);
+  otaP.end();
+  audio_setVolume((uint8_t)volumePercent);
+  audio_setHeadphonesMode(btHeadphonesMode);
+  audio_setBtDeviceName(btDeviceName);
+  if (!updatePending) applyAudioOutput();
+
   // SD card: splash + soundscape list. Missing card = plain screens, no sounds.
   bool sdOk = sdmedia_begin();
   Serial.printf("SD card mount: %s\n", sdOk ? "OK" : "FAILED");
@@ -3501,14 +3514,15 @@ void setup() {
   loadPeople();
   loadFavorites();
   loadSessionLog();
-  loadSetupInfo();
-  wifitime_begin(); // brief NTP sync only if WiFi was set up; WiFi is off again afterwards
+  // Clock sync over WiFi - skipped when Bluetooth is the output, because WiFi
+  // on the shared radio slows the Bluetooth connection (the clock still gets
+  // set during update checks).
+  if (!audioUsingBluetooth()) wifitime_begin();
 
-  audio_setVolume((uint8_t)volumePercent);
-  audio_setHeadphonesMode(btHeadphonesMode);
-  audio_setBtDeviceName(btDeviceName);
-  runPendingUpdateCheck(); // before Bluetooth starts, so the download has the memory it needs
-  applyAudioOutput(); // Bluetooth connects in the background if it's the chosen output
+  if (updatePending) {
+    runPendingUpdateCheck(); // before Bluetooth starts, so the download has the memory it needs
+    applyAudioOutput();
+  }
   Serial.printf("[MEM] free after startup: %u bytes\n", ESP.getFreeHeap());
 }
 
