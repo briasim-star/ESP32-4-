@@ -86,7 +86,7 @@ void wifitime_begin() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(); // reconnects using the ESP32's own saved credentials
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 6000) { // runs before Bluetooth starts - keep it short
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) { // before Bluetooth starts; 6 s was too short on some starts
     delay(100);
   }
   if (WiFi.status() == WL_CONNECTED) {

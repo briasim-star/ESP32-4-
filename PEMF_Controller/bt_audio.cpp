@@ -222,6 +222,9 @@ static bool openWav(const char* path) {
     return false;
   }
   sndRemaining = sndDataSize;
+  // (integer math only - float printf uses a lot of stack, and this task's is small)
+  Serial.printf("[SCAPE] opened %s: %lu bytes of sound (%lu s), %u channel(s)\n", path, (unsigned long)sndDataSize,
+                (unsigned long)(sndDataSize / ((uint32_t)AUD_SAMPLE_RATE * sndChannels * 2)), sndChannels);
   return true;
 }
 
@@ -242,17 +245,22 @@ static void refillRing() {
     if (chunk > RING_FRAMES - wp) chunk = RING_FRAMES - wp;
     if (chunk > (int)sizeof(readBuf) / bpf) chunk = sizeof(readBuf) / bpf;
     if (sndRemaining < (uint32_t)bpf) { // loop the file seamlessly
+      unsigned long t0 = millis();
       sdmedia_lock();
       sndFile.seek(sndDataStart);
       sdmedia_unlock();
       sndRemaining = sndDataSize;
+      Serial.printf("[SCAPE] looped: seek %lu ms, buffer %d frames, gaps so far %lu\n", millis() - t0, freeFrames < RING_FRAMES ? RING_FRAMES - freeFrames : 0, g_underruns);
     }
     if ((uint32_t)(chunk * bpf) > sndRemaining) chunk = sndRemaining / bpf;
 
     sdmedia_lock();
     int got = sndFile.read(readBuf, chunk * bpf) / bpf;
     sdmedia_unlock();
-    if (got <= 0) { sdmedia_lock(); sndFile.seek(sndDataStart); sdmedia_unlock(); sndRemaining = sndDataSize; return; }
+    if (got <= 0) {
+      Serial.printf("[SCAPE] read returned %d with %lu bytes left - starting over\n", got, (unsigned long)sndRemaining);
+      sdmedia_lock(); sndFile.seek(sndDataStart); sdmedia_unlock(); sndRemaining = sndDataSize; return;
+    }
     sndRemaining -= got * bpf;
 
     const int16_t* s = (const int16_t*)readBuf;
