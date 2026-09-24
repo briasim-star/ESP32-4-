@@ -29,10 +29,10 @@
 
 #define LOAD_GLCD
 #define LOAD_FONT2
-#define LOAD_FONT4
-#define LOAD_FONT6
-#define LOAD_FONT7
-#define LOAD_FONT8
+// #define LOAD_FONT4   // not used by MADD PEMF - left out to keep the firmware small enough for wireless updates
+// #define LOAD_FONT6   // not used by MADD PEMF - left out to keep the firmware small enough for wireless updates
+// #define LOAD_FONT7   // not used by MADD PEMF - left out to keep the firmware small enough for wireless updates
+// #define LOAD_FONT8   // not used by MADD PEMF - left out to keep the firmware small enough for wireless updates
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
