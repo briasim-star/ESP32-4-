@@ -484,10 +484,13 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 
 static void btService() {
   if (!g_btStarted) return;
-  if ((!btVolumeSent || btVolumeDirty) && a2dp.is_connected()) {
-    a2dp.set_volume(btSpeakerVolumeFor(g_volumePercent));
+  // On each connection: ask the speaker to sit near its maximum (many
+  // speakers honour this; some ignore it and keep their own last volume).
+  // Our own volume control works in the sound itself, so it works on
+  // every speaker either way.
+  if (!btVolumeSent && a2dp.is_connected()) {
+    a2dp.set_volume(120);
     btVolumeSent = true;
-    btVolumeDirty = false;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
 
@@ -573,7 +576,13 @@ void audio_setVolume(uint8_t percent) {
   g_volumePercent = percent;
   btVolumeDirty = true; // sent to the speaker by btService()
   if (g_output == AUDIO_OUT_BLUETOOTH) {
-    g_volume = percent == 0 ? 0.0f : 1.0f;
+    // Same shape as the speaker scale: 55% = the clean tested level (3 dB
+    // under full, since the speaker itself sits near max), 5% = very quiet.
+    if (percent == 0) g_volume = 0.0f;
+    else {
+      float db = (percent <= 55) ? (percent - 55) * 0.7f : (percent - 55) * 0.13f;
+      g_volume = powf(10.0f, (db - 3.0f) / 20.0f);
+    }
   } else {
     // Onboard speaker: ~2 dB per 5% step below 55%, gentler above (limiter
     // keeps the top clean). 0% = silent.
