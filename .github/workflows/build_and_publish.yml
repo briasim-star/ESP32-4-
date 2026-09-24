@@ -55,7 +55,7 @@ jobs:
       - name: Check the firmware fits its update slot
         run: |
           SIZE=$(stat -c%s build_output/PEMF_Controller.ino.bin)
-          MAX=2031616   # 0x1F0000 - one app slot in PEMF_Controller/partitions.csv
+          MAX=2064384   # 0x1F8000 - one app slot in PEMF_Controller/partitions.csv (enlarged in 1.9.2)
           echo "firmware.bin is $SIZE bytes (limit $MAX)"
           if [ "$SIZE" -gt "$MAX" ]; then echo "::error::Firmware is too big for wireless updates - trim it before publishing."; exit 1; fi
 
