@@ -71,7 +71,7 @@ static uint32_t read32(fs::File &f) {
 // Reads ROWS_PER_CHUNK rows per SD read (one big read is far faster than
 // hundreds of tiny ones) and releases the SD lock between chunks so a
 // playing soundscape never starves while the splash is being drawn.
-static const int ROWS_PER_CHUNK = 8;
+static const int ROWS_PER_CHUNK = 4; // ~5.8 KB temporary buffer - leaves RAM for Bluetooth
 
 static bool drawBmpFromSd(const char *filename, int16_t x, int16_t y) {
   if ((x >= tft.width()) || (y >= tft.height())) return false;

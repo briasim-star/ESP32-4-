@@ -8,6 +8,7 @@
 #include <SD.h>
 #include <Preferences.h>
 #include <esp_gap_bt_api.h>
+#include <esp_bt.h>
 #include <math.h>
 
 // ============================================================================
@@ -119,7 +120,7 @@ static void renderTone(StereoFrame* out, int n) {
 // Consumer = whichever output is active. Index updates are guarded by a
 // spinlock; a generation counter makes a file switch safe mid-read.
 // ---------------------------------------------------------------------------
-static const int RING_FRAMES = 8192; // ~186 ms of cushion for Bluetooth hiccups and slow SD reads
+static const int RING_FRAMES = 2048; // ~46 ms - refilled every 2 ms. Kept small ON PURPOSE: Bluetooth needs the RAM (32 KB here crashed it)
 static StereoFrame sndRing[RING_FRAMES];
 static int ringWritePos = 0, ringReadPos = 0, ringFilled = 0;
 static uint32_t ringGen = 0;
@@ -210,7 +211,7 @@ static bool openWav(const char* path) {
   return true;
 }
 
-static uint8_t readBuf[4096];
+static uint8_t readBuf[2048];
 
 static void refillRing() {
   if (!sndFile || sndDataSize == 0) return;
@@ -508,7 +509,7 @@ void audio_begin() {
   // The speaker's I2S driver is installed only when the speaker is actually
   // the chosen output (see audio_setOutput) - it holds ~16 KB of DMA memory
   // that the Bluetooth stack needs more when Bluetooth is in use.
-  xTaskCreatePinnedToCore(audioTask, "audio", 6144, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(audioTask, "audio", 4096, NULL, 3, NULL, 1);
 }
 
 void audio_setOutput(AudioOutput out) {
@@ -554,6 +555,9 @@ const char* audio_btDeviceName() { return btName; }
 
 void audio_btConnect() {
   if (g_btStarted || btName[0] == 0) return;
+  // The radio reserves ~30 KB for Bluetooth Low Energy, which we never use.
+  // Hand it back before starting - Bluetooth audio needs every bit of RAM.
+  esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
   btLoadSavedAddr();
   a2dp.set_on_connection_state_changed(onBtConnectionState);
   a2dp.set_ssid_callback(onSsidMatchSaved);
@@ -613,6 +617,7 @@ static void onDiscoveryModeChanged(esp_bt_gap_discovery_state_t mode) {
 
 void audio_btStartScan() {
   scanCount = 0;
+  if (!g_btStarted) esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // same RAM saving as audio_btConnect()
   a2dp.set_ssid_callback(onSsidFound);
   a2dp.set_discovery_mode_callback(onDiscoveryModeChanged);
   a2dp.set_on_connection_state_changed(onBtConnectionState);
