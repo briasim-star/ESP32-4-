@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.5.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.5.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -2398,7 +2398,7 @@ static const HomeTileDef HOME_TILES[9] = {
   {"Athletic", TILE_CATEGORY, CAT_PAIN_RECOVERY,    0},
   {"Body",     TILE_CATEGORY, CAT_BONE_JOINT,       1},
   {"Skin",     TILE_CATEGORY, CAT_SKIN_WOUND,       3},
-  {"Programs", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
+  {"Guided", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
   {"Custom",   TILE_CUSTOM,   CAT_BONE_JOINT,      -2},
   {"Settings", TILE_SETTINGS, CAT_BONE_JOINT,      -2},
 };
@@ -2561,7 +2561,7 @@ void getSequenceFreqRange(int idx, char* buf, size_t bufLen) {
 
 void drawSequencesScreen() {
   drawAuroraBackground();
-  drawTopBar("Programs", true, true);
+  drawTopBar("Guided Sessions", true, true);
 
   int start = sequencesPage * SEQUENCES_PER_PAGE;
   for (int i = 0; i < SEQUENCES_PER_PAGE; i++) {
@@ -2592,7 +2592,7 @@ void handleSequencesTouch(int x, int y) {
       selName = p.name;
       selFreq = p.steps[0].freqHz;
       selWave = p.steps[0].wave;
-      selCategoryName = "Programs";
+      selCategoryName = "Guided Sessions";
       selectedIndex = -1;
       pendingSequenceIndex = idx;
       runScreenOrigin = SCR_SEQUENCES;
@@ -3549,6 +3549,16 @@ void loop() {
   wasTouched = touched;
 
   syncAudio();
+
+  // Hidden audio health report, USB cable only (never on screen): every 2 s
+  // while sound is playing - frames sent to Bluetooth, buffer gaps, free memory.
+  static unsigned long lastAudioReport = 0;
+  if (audio_getSource() != AUDIO_SRC_OFF && millis() - lastAudioReport > 2000) {
+    static uint32_t lastFrames = 0; static unsigned long lastUnder = 0;
+    uint32_t fr = audio_btFramesSent(); unsigned long un = audio_underruns();
+    Serial.printf("[AUDIO] out=%s src=%d coil=%s frames/s=%lu gaps=%lu heap=%u\n", audioUsingBluetooth() ? "BT" : "SPK", (int)audio_getSource(), waveform_isRunning() ? "on" : "off", (unsigned long)((fr - lastFrames) / 2), un - lastUnder, ESP.getFreeHeap());
+    lastFrames = fr; lastUnder = un; lastAudioReport = millis();
+  }
 
   // ---- drawing: at most ONE full draw per pass ----
   bool changed = fullRedrawRequested || screen != lastDrawnScreen ||

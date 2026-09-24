@@ -107,7 +107,7 @@ static void renderTone(StereoFrame* out, int n) {
 // Consumer = whichever output is active. Index updates are guarded by a
 // spinlock; a generation counter makes a file switch safe mid-read.
 // ---------------------------------------------------------------------------
-static const int RING_FRAMES = 4096; // ~93 ms - the audio task refills every ~5 ms
+static const int RING_FRAMES = 8192; // ~186 ms of cushion for Bluetooth hiccups and slow SD reads
 static StereoFrame sndRing[RING_FRAMES];
 static int ringWritePos = 0, ringReadPos = 0, ringFilled = 0;
 static uint32_t ringGen = 0;
@@ -449,7 +449,7 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 static void btService() {
   if (!g_btStarted) return;
   if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(100); // ~80% of the headset's range; our own volume curve does the rest
+    a2dp.set_volume(120); // ~95% of the headset's range so it starts clearly audible; our volume curve does the rest
     btVolumeSent = true;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
@@ -470,7 +470,7 @@ static void audioTask(void*) {
     if (g_output == AUDIO_OUT_SPEAKER && g_speakerReady) {
       speakerPump(); // blocks in i2s_write -> paces this loop (~5.8 ms per pass)
     } else {
-      vTaskDelay(pdMS_TO_TICKS(5));
+      vTaskDelay(pdMS_TO_TICKS(2)); // Bluetooth pulls audio itself - just keep the soundscape buffer full
     }
   }
 }
