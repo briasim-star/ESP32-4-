@@ -62,6 +62,7 @@ enum BtStatus : uint8_t {
 BtStatus audio_btStatus();
 uint32_t audio_btStatusChanges();          // increments on every connect/disconnect - lets the UI notice changes
 void audio_btRetry();                      // "tap to retry" - goes straight to the remembered device
+void audio_btForget();                     // erase the paired device everywhere (ours + the library's memory)
 void audio_btConnectToScanResult(int idx); // connect to a device picked from the scan list (no restart)
 bool audio_btStarted();
 bool audio_btIsConnected();

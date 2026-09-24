@@ -449,7 +449,7 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 static void btService() {
   if (!g_btStarted) return;
   if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(115); // ~90% of the headset's range, so it is clearly audible from the start
+    a2dp.set_volume(100); // ~80% of the headset's range; our own volume curve does the rest
     btVolumeSent = true;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
@@ -518,7 +518,9 @@ const char* audio_soundscapeFile() { return currentPath; }
 
 void audio_setVolume(uint8_t percent) {
   if (percent > 100) percent = 100;
-  g_volume = percent / 100.0f;
+  // Ears hear loudness on a curve, not a straight line - this makes 50% sound
+  // like half volume instead of nearly full.
+  g_volume = powf(percent / 100.0f, 1.8f);
 }
 
 void audio_setHeadphonesMode(bool on) { g_headphones = on; }
@@ -626,6 +628,20 @@ int audio_btScanResultCount() { return scanCount; }
 const char* audio_btScanResultName(int idx) {
   if (idx < 0 || idx >= scanCount) return "";
   return scanResults[idx];
+}
+
+// Forget the paired device everywhere it is remembered: our fast-reconnect
+// memory AND the Bluetooth library's own "last device" (otherwise the library
+// quietly reconnects to the old speaker).
+void audio_btForget() {
+  if (g_btStarted && a2dp.is_connected()) a2dp.disconnect();
+  a2dp.clean_last_connection();
+  Preferences p;
+  p.begin("btaddr", false);
+  p.clear();
+  p.end();
+  btSavedAddrValid = false;
+  btName[0] = 0;
 }
 
 uint32_t audio_btFramesSent() { return btFramesSent; }

@@ -32,7 +32,7 @@ const char* ota_lastErrorMessage() { return lastError; }
 static const unsigned long OTA_HTTP_TIMEOUT_MS = 15000; // request-level timeout
 static const unsigned long OTA_STALL_TIMEOUT_MS = 15000; // used below during download - if no new bytes arrive for this long, abort rather than hang
 
-bool ota_checkForUpdate() {
+static bool checkForUpdateImpl() {
   lastError[0] = 0;
   if (!ensureWifiConnected()) {
     strncpy(lastError, "Could not connect to WiFi", sizeof(lastError) - 1);
@@ -68,7 +68,7 @@ bool ota_checkForUpdate() {
   return strcmp(latestVersion, FIRMWARE_VERSION) != 0;
 }
 
-bool ota_downloadAndInstall() {
+static bool downloadAndInstallImpl() {
   lastError[0] = 0;
   if (!ensureWifiConnected()) {
     strncpy(lastError, "Could not connect to WiFi", sizeof(lastError) - 1);
@@ -166,4 +166,23 @@ bool ota_downloadAndInstall() {
 
   ESP.restart(); // new firmware takes over from here
   return true; // unreachable, but keeps the compiler happy
+}
+
+// WiFi and Bluetooth share one radio on the ESP32. Leaving WiFi on after an
+// update check makes Bluetooth audio crackle, so it is always switched off.
+static void wifiOff() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+bool ota_checkForUpdate() {
+  bool r = checkForUpdateImpl();
+  wifiOff();
+  return r;
+}
+
+bool ota_downloadAndInstall() {
+  bool r = downloadAndInstallImpl(); // restarts on success
+  wifiOff();
+  return r;
 }

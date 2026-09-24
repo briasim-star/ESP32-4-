@@ -41,6 +41,9 @@
 #include "local_audio.h"
 #include <esp_task_wdt.h>
 #include "ui_types.h"
+#include <nvs_flash.h>
+#include <driver/gpio.h>
+#include <esp_sleep.h>
 
 // Set this to false if you don't want to build/wire the Bluetooth audio
 // feature at all (skips linking the A2DP library's Bluetooth stack).
@@ -50,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.4.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.5.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1478,23 +1481,119 @@ unsigned long wifiForgetArmedAt = 0;
 unsigned long factoryResetArmedAt = 0;
 static const unsigned long FACTORY_RESET_ARM_WINDOW_MS = 5000;
 
+// Everything goes: settings, people, favorites, session log, WiFi, Bluetooth
+// pairings (ours and the library's), room label and touch calibration. The
+// unit starts up exactly like a new one (including the touch setup).
 void performFactoryReset() {
-  Preferences p;
-  p.begin("favs", false); p.clear(); p.end();
-  p.begin("log", false);  p.clear(); p.end();
-  p.begin("setup", false); p.clear(); p.end();
-  p.begin("people", false); p.clear(); p.end();
-  for (int i = 0; i < MAX_PEOPLE; i++) {
-    char ns[10];
-    snprintf(ns, sizeof(ns), "favs_%d", i);
-    p.begin(ns, false); p.clear(); p.end();
-  }
-  // "tftcal" (touch calibration) and "roomcfg" (room label) deliberately
-  // NOT cleared - those are characteristics of this physical unit and its
-  // placement, not resettable user settings.
+  tft.fillScreen(COLOR_BG);
+  tft.setFreeFont(FONT_LG);
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Factory reset...", 240, 150);
+  tft.setTextDatum(TL_DATUM);
+  endSession();
+  audio_setSource(AUDIO_SRC_OFF);
+  audio_btEnd();
   if (wifitime_isConfigured()) wifitime_forgetNetwork();
-  audio_btEnd(); // clean BT teardown before restarting
+  nvs_flash_erase(); // the whole settings store, in one step
+  nvs_flash_init();
+  delay(500);
   ESP.restart();
+}
+
+// ---------------------------------------------------------------------
+// BOOT button = power button (and long-hold factory reset)
+//   - tap while on:   "Press BOOT again to turn off" (5 s to confirm)
+//   - tap while off:  turns back on
+//   - hold 10 s:      countdown, then full factory reset
+// "Off" is deep sleep: screen, coil, speaker and Bluetooth all off, with
+// the coil driver pins locked LOW so the MD10C can't drift while asleep.
+// ---------------------------------------------------------------------
+static const int BOOT_BTN = 0;
+extern bool fullRedrawRequested; // defined with the other loop() state further down
+bool powerOffArmed = false;
+unsigned long powerOffArmedAt = 0;
+
+void drawBootBanner(const char* msg, uint16_t edge) {
+  Rect t = {40, 258, 400, 40};
+  tft.fillRoundRect(t.x, t.y, t.w, t.h, 12, COLOR_PANEL);
+  tft.drawRoundRect(t.x, t.y, t.w, t.h, 12, edge);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(TFT_WHITE, COLOR_PANEL);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(msg, 240, t.y + t.h / 2);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void powerOff() {
+  endSession();
+  audio_setSource(AUDIO_SRC_OFF);
+  tft.fillScreen(COLOR_BG);
+  tft.setFreeFont(FONT_LG);
+  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Turning off", 240, 140);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.drawString("Press BOOT to turn back on.", 240, 175);
+  tft.setTextDatum(TL_DATUM);
+  delay(1200);
+  audio_btEnd();
+
+  // Lock every output that could drive something in a safe OFF state.
+  ledcDetachPin(PIN_MD10C_PWM);
+  ledcDetachPin(PIN_MD10C_DIR);
+  const gpio_num_t lowPins[]  = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL };
+  const gpio_num_t highPins[] = { (gpio_num_t)AUDIO_ENABLE }; // amp enable is active LOW
+  for (gpio_num_t p : lowPins)  { pinMode(p, OUTPUT); digitalWrite(p, LOW);  gpio_hold_en(p); }
+  for (gpio_num_t p : highPins) { pinMode(p, OUTPUT); digitalWrite(p, HIGH); gpio_hold_en(p); }
+  gpio_deep_sleep_hold_en();
+  tft.writecommand(0x10); // display sleep
+
+  while (digitalRead(BOOT_BTN) == LOW) delay(10); // wait for release, or it would wake instantly
+  delay(200);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);    // BOOT pressed = wake
+  esp_deep_sleep_start();
+}
+
+// Called every loop(). Handles tap / double-tap-to-off / long-hold reset.
+void serviceBootButton() {
+  static unsigned long pressedAt = 0;
+  static bool wasDown = false;
+  static int lastCountShown = -1;
+  bool down = (digitalRead(BOOT_BTN) == LOW);
+
+  if (powerOffArmed && millis() - powerOffArmedAt > 5000) {
+    powerOffArmed = false;
+    fullRedrawRequested = true; // clear the banner
+  }
+
+  if (down && !wasDown) { pressedAt = millis(); lastCountShown = -1; }
+  if (down) {
+    unsigned long held = millis() - pressedAt;
+    if (held > 3000) {
+      int left = 10 - (int)(held / 1000);
+      if (left <= 0) performFactoryReset();
+      if (left != lastCountShown) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Keep holding to factory reset: %d", left);
+        drawBootBanner(msg, COLOR_DANGER);
+        lastCountShown = left;
+      }
+    }
+  }
+  if (!down && wasDown) {
+    unsigned long held = millis() - pressedAt;
+    if (held > 3000) {
+      fullRedrawRequested = true; // let go before 10 s - cancelled
+    } else if (held > 30) {
+      if (powerOffArmed) powerOff();
+      powerOffArmed = true;
+      powerOffArmedAt = millis();
+      drawBootBanner("Press BOOT again to turn off", COLOR_WARN);
+    }
+  }
+  wasDown = down;
 }
 
 Screen soundscapesOrigin = SCR_SETTINGS; // where Soundscapes' "Back" returns to - SCR_RUN when entered mid-session instead. Declared here (moved from near the Soundscapes screen code) because handleSettingsItemTap() below uses it - a real "used before declared" build failure otherwise.
@@ -1933,6 +2032,7 @@ void handleBtScanTouch(int x, int y) {
   }
   if (strlen(btDeviceName) > 0 && touchInRect(x, y, btnForgetBt)) {
     if (btForgetArmed) {
+      audio_btForget();
       btDeviceName[0] = 0;
       btHeadphonesMode = false;
       btForgetArmed = false;
@@ -1954,15 +2054,25 @@ void handleBtScanTouch(int x, int y) {
       btDeviceName[sizeof(btDeviceName) - 1] = 0;
       audioOutputPref = AUDIO_OUT_BLUETOOTH; // picking a device means "use Bluetooth"
       saveSetupInfo();
-      // Connect right now - no restart. The status line above the list
-      // shows Connecting... then Connected.
-      audio_setBtDeviceName(btDeviceName);
-      audio_setOutput(AUDIO_OUT_BLUETOOTH);
-      audio_btConnectToScanResult(i);
-      btPickAt = millis();
-      scanRequested = false;
-      screen = SCR_BT_SCAN;
-      return;
+      // Proven path: save the choice, clear any previously paired device from
+      // the library (so it can't reconnect to the old one), restart once, and
+      // connect by name at startup - that connection plays audio properly.
+      audio_btStopScan();
+      audio_btForget();
+      tft.fillScreen(COLOR_BG);
+      tft.setFreeFont(FONT_LG);
+      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextDatum(MC_DATUM);
+      char msg[48];
+      snprintf(msg, sizeof(msg), "Connecting to %s", btDeviceName);
+      tft.drawString(msg, 240, 140);
+      tft.setFreeFont(FONT_SM);
+      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.drawString("Restarting once to connect - about 10 seconds.", 240, 175);
+      tft.setTextDatum(TL_DATUM);
+      delay(1500);
+      audio_btEnd();
+      ESP.restart();
     }
   }
   // Tapping the status line when a device wasn't found retries right away.
@@ -3307,6 +3417,11 @@ bool lastDrawnShowDeviceStats = false;
 
 void setup() {
   Serial.begin(115200);
+  // Waking from "off": release the pins that were locked safe for sleep.
+  gpio_deep_sleep_hold_dis();
+  const gpio_num_t heldPins[] = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL, (gpio_num_t)AUDIO_ENABLE };
+  for (gpio_num_t p : heldPins) gpio_hold_dis(p);
+  pinMode(BOOT_BTN, INPUT_PULLUP);
 
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
@@ -3363,6 +3478,7 @@ void setup() {
 void loop() {
   uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
+  serviceBootButton();
 
   if (screen == SCR_WIFI_SETUP && wifitime_isPortalActive()) {
     if (wifitime_processPortal()) {
