@@ -304,6 +304,20 @@ static inline int16_t clip16(float v) {
 static float fadeGain = 0.0f;
 static const float FADE_STEP = 1.0f / (AUD_SAMPLE_RATE * 0.04f); // ~40 ms
 
+// Sleep Night shaping: an extra loudness multiplier (smoothed per sample so
+// changes never click) and a gentle low-pass that makes the sound warmer and
+// darker as the night goes on. 1.0 / no filter = normal playback.
+static volatile float g_nightTarget = 1.0f;
+static volatile float g_nightAlpha = 1.0f;   // low-pass amount: 1 = off, 0.25 = warm (~1.7 kHz)
+static float nightGain = 1.0f, lpL = 0.0f, lpR = 0.0f;
+
+void audio_setNightShape(float gain, float warmth) {
+  gain = gain < 0 ? 0 : (gain > 1 ? 1 : gain);
+  warmth = warmth < 0 ? 0 : (warmth > 1 ? 1 : warmth);
+  g_nightTarget = gain;
+  g_nightAlpha = 1.0f - 0.75f * warmth;
+}
+
 static void renderFrames(StereoFrame* out, int n) {
   AudioSource want = g_source;
 
@@ -315,12 +329,17 @@ static void renderFrames(StereoFrame* out, int n) {
   // Soundscape files are mastered quieter than our tone - lift them to match.
   float srcGain = (renderingSource == AUDIO_SRC_SOUNDSCAPE) ? SCAPE_GAIN : 1.0f;
   bool switching = (want != renderingSource);
+  float nTarget = g_nightTarget, alpha = g_nightAlpha;
   for (int i = 0; i < n; i++) {
     if (switching) { fadeGain -= FADE_STEP; if (fadeGain < 0) fadeGain = 0; }
     else if (fadeGain < 1.0f) { fadeGain += FADE_STEP; if (fadeGain > 1.0f) fadeGain = 1.0f; }
-    float g = fadeGain * vol * srcGain;
-    out[i].l = softLimit(out[i].l * g);
-    out[i].r = softLimit(out[i].r * g);
+    nightGain += (nTarget - nightGain) * 0.0005f;
+    float l = out[i].l, r = out[i].r;
+    if (alpha < 0.999f) { lpL += alpha * (l - lpL); lpR += alpha * (r - lpR); l = lpL; r = lpR; }
+    else { lpL = l; lpR = r; }
+    float g = fadeGain * vol * srcGain * nightGain;
+    out[i].l = softLimit(l * g);
+    out[i].r = softLimit(r * g);
   }
   if (switching && fadeGain <= 0.0f) {
     renderingSource = want;

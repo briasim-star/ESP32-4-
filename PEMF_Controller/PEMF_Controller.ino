@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1536,6 +1536,8 @@ void drawBootBanner(const char* msg, uint16_t edge) {
 void powerOff() {
   endSession();
   audio_setSource(AUDIO_SRC_OFF);
+  { Preferences sp; sp.begin("sleepnight", false); sp.putInt("left", 0); sp.end(); } // turning off on purpose ends a Sleep Night
+  digitalWrite(TFT_BL, HIGH);
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_LG);
   tft.setTextColor(TFT_WHITE, COLOR_BG);
@@ -3674,6 +3676,186 @@ void playStartupAnimation() {
   delay(700);
 }
 
+// ---------------------------------------------------------------------
+// Sleep Night - sound only, coil stays OFF. The soundscape stays full for
+// the first 30 min (with a slow breathing swell), then slowly softens and
+// warms, and fades to silence over the last 15 min. No chime. The screen
+// goes dark after 15 s; a tap lights it (Stop button). Progress is saved
+// every minute, so a restart or power blip resumes where it left off.
+// Started over USB serial: "SLEEP <minutes> [sound name]", "STOP", "LIST".
+// ---------------------------------------------------------------------
+bool sleepNightOn = false;
+bool sleepDarkAfter = false;           // finished: stay dark until a tap
+unsigned long sleepStartMs = 0, sleepTotalMs = 0, sleepLitAt = 0, sleepLastSave = 0;
+bool sleepLit = false;
+int sleepScapeIdx = -1;
+const Rect sleepStopBtn = {160, 214, 160, 56};
+
+void saveSleepNight(int minutesLeft) {
+  Preferences p;
+  p.begin("sleepnight", false);
+  p.putInt("left", minutesLeft);
+  p.putInt("scape", sleepScapeIdx);
+  p.end();
+}
+
+void drawSleepNightScreen() {
+  drawAuroraBackground();
+  Rect c = {60, 60, 360, 130};
+  drawChamfer(c, MADD_PANEL, MADD_EDGE, 12);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+  tft.drawString("Sleep Night", 240, 92);
+  char buf[40], name[24];
+  prettySoundName(sleepScapeIdx, name, sizeof(name));
+  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+  tft.drawString(name, 240, 130);
+  unsigned long el = millis() - sleepStartMs;
+  int left = el >= sleepTotalMs ? 0 : (int)((sleepTotalMs - el) / 60000UL);
+  snprintf(buf, sizeof(buf), "Sound only - ends in %d min", left);
+  tft.drawString(buf, 240, 162);
+  tft.setTextDatum(TL_DATUM);
+  drawChamferButton(sleepStopBtn, "Stop", MADD_PANEL, MADD_MAGENTA, MADD_TEXT);
+}
+
+void sleepLightScreen() {
+  digitalWrite(TFT_BL, HIGH);
+  sleepLit = true; sleepLitAt = millis();
+  drawSleepNightScreen();
+}
+
+void startSleepNight(unsigned long minutes, int scapeIdx) {
+  if (scapeIdx < 0 || scapeIdx >= sdmedia_soundscapeCount()) { Serial.println("[SLEEP] no soundscape on the SD card"); return; }
+  if (waveform_isRunning()) endSession(); // sound only - the coil never runs in Sleep Night
+  startCountdownAt = 0;
+  sleepScapeIdx = scapeIdx;
+  sleepNightOn = true; sleepDarkAfter = false;
+  sleepStartMs = millis(); sleepTotalMs = minutes * 60000UL; sleepLastSave = 0;
+  audio_setNightShape(0.0f, 0.0f);     // loop() raises it gently over 20 s
+  audio_setSoundscapeFile(sdmedia_soundscapePath(scapeIdx));
+  audio_setSource(AUDIO_SRC_SOUNDSCAPE);
+  saveSleepNight((int)minutes);
+  sleepLightScreen();
+  Serial.printf("[SLEEP] started: %lu min, sound '%s'\n", minutes, sdmedia_soundscapeName(scapeIdx));
+}
+
+void stopSleepNight(bool stayDark) {
+  sleepNightOn = false;
+  audio_setSource(AUDIO_SRC_OFF);
+  audio_setNightShape(1.0f, 0.0f);
+  saveSleepNight(0);
+  screen = SCR_CATEGORY;
+  fullRedrawRequested = true;
+  sleepDarkAfter = stayDark;
+  if (!stayDark) digitalWrite(TFT_BL, HIGH);
+  Serial.println("[SLEEP] stopped");
+}
+
+// Loudness and warmth for the moment we're at in the night.
+void updateSleepShape() {
+  float el = (float)(millis() - sleepStartMs) / 60000.0f;   // minutes
+  float total = (float)sleepTotalMs / 60000.0f;
+  float g = 1.0f, warm = 0.0f;
+  float softStart = 30.0f, fadeStart = total - 15.0f;
+  if (fadeStart < softStart) softStart = fadeStart;
+  if (el < softStart) {
+    g = 1.0f;
+  } else if (el < fadeStart) {
+    float k = (el - softStart) / (fadeStart - softStart);
+    g = 1.0f - 0.45f * k;               // about -5 dB by the last 15 min
+    warm = k;
+  } else {
+    float k = (el - fadeStart) / 15.0f; if (k > 1.0f) k = 1.0f;
+    g = 0.55f * (1.0f - k);
+    warm = 1.0f;
+  }
+  float inSec = (float)(millis() - sleepStartMs) / 1000.0f;
+  if (inSec < 20.0f) g *= inSec / 20.0f;                     // gentle 20 s rise
+  if (el < 30.0f) {                                          // breathing swell, 6 -> 5 per minute
+    float period = 10.0f + 2.0f * (el / 30.0f);
+    float depth = el < 25.0f ? 0.12f : 0.12f * (30.0f - el) / 5.0f;
+    float phase = fmodf(inSec, period) / period;
+    g *= 1.0f - depth * (0.5f - 0.5f * cosf(6.2831853f * phase));
+  }
+  audio_setNightShape(g, warm);
+}
+
+void serviceSleepSerial() {
+  static char line[48]; static int len = 0;
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch != '\n') { if (len < (int)sizeof(line) - 1) line[len++] = ch; continue; }
+    line[len] = 0; len = 0;
+    if (strncmp(line, "LIST", 4) == 0) {
+      for (int i = 0; i < sdmedia_soundscapeCount(); i++) Serial.printf("[SLEEP] %d: %s\n", i, sdmedia_soundscapeName(i));
+    } else if (strncmp(line, "STOP", 4) == 0) {
+      if (sleepNightOn) stopSleepNight(false);
+    } else if (strncmp(line, "SLEEP", 5) == 0) {
+      char* rest = line + 5;
+      long mins = strtol(rest, &rest, 10);
+      if (mins <= 0 || mins > 720) mins = 300;
+      while (*rest == ' ') rest++;
+      int idx = -1;
+      if (*rest) for (int i = 0; i < sdmedia_soundscapeCount(); i++) if (nameHas(sdmedia_soundscapeName(i), rest)) { idx = i; break; }
+      if (idx < 0) idx = defaultSoundscapeFor("sleep", 1.0f);
+      startSleepNight((unsigned long)mins, idx);
+    }
+  }
+}
+
+// Called at the top of loop(). Returns true while Sleep Night owns the device.
+bool serviceSleepNight(bool touched, int tx, int ty) {
+  static bool wasDown = false;
+  bool press = touched && !wasDown;
+  wasDown = touched;
+  if (sleepDarkAfter && !sleepNightOn) {
+    if (!press) return true;
+    sleepDarkAfter = false;
+    digitalWrite(TFT_BL, HIGH);
+    fullRedrawRequested = true;
+    uint16_t x, y;
+    while (tft.getTouch(&x, &y)) delay(20); // the wake tap only lights the screen
+    return true;
+  }
+  if (!sleepNightOn) return false;
+
+  unsigned long el = millis() - sleepStartMs;
+  if (el >= sleepTotalMs) { stopSleepNight(!sleepLit); return true; }
+  updateSleepShape();
+  if (millis() - sleepLastSave >= 60000UL) {
+    sleepLastSave = millis();
+    saveSleepNight((int)((sleepTotalMs - el) / 60000UL) + 1);
+  }
+  if (press) {
+    if (!sleepLit) sleepLightScreen();
+    else if (touchInRect(tx, ty, sleepStopBtn)) {
+      stopSleepNight(false);
+      uint16_t x, y;
+      while (tft.getTouch(&x, &y)) delay(20); // so the same press doesn't land on the Home screen
+    }
+    else sleepLitAt = millis();
+  }
+  if (sleepLit && sleepNightOn && millis() - sleepLitAt > 15000UL) {
+    sleepLit = false;
+    digitalWrite(TFT_BL, LOW);
+  }
+  return true;
+}
+
+// After a restart: pick the night back up if one was running.
+void resumeSleepNightIfSaved() {
+  Preferences p;
+  p.begin("sleepnight", true);
+  int left = p.getInt("left", 0);
+  int idx = p.getInt("scape", -1);
+  p.end();
+  if (left <= 0) return;
+  if (idx < 0 || idx >= sdmedia_soundscapeCount()) idx = defaultSoundscapeFor("sleep", 1.0f);
+  Serial.printf("[SLEEP] resuming: %d min left\n", left);
+  startSleepNight((unsigned long)left, idx);
+}
+
 void setup() {
   Serial.begin(115200);
   // Waking from "off": release the pins that were locked safe for sleep.
@@ -3779,12 +3961,15 @@ void setup() {
     applyAudioOutput();
   }
   Serial.printf("[MEM] free after startup: %u bytes\n", ESP.getFreeHeap());
+  resumeSleepNightIfSaved();
 }
 
 void loop() {
   uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
   serviceBootButton();
+  serviceSleepSerial();
+  if (serviceSleepNight(touched, tx, ty)) { delay(20); return; }
 
   // A "touch" held for 4+ seconds is almost always something pressing the
   // screen (a bezel on the touch film), which blocks every real tap. Say so.

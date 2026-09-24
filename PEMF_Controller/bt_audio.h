@@ -43,6 +43,7 @@ bool audio_setSoundscapeFile(const char* path); // opens the WAV (does not start
 const char* audio_soundscapeFile();
 void audio_setVolume(uint8_t percent);     // 0-100
 void audio_chime(float hz, uint16_t ms);   // soft bell on top of whatever is playing (session start/end)
+void audio_setNightShape(float gain, float warmth); // Sleep Night: 0-1 loudness, 0-1 warmth (1/0 = normal)
 void audio_setHeadphonesMode(bool on);     // true = real binaural beats (headphones only)
 bool audio_isHeadphonesMode();
 
