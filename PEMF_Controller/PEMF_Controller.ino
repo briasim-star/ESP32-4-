@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.6.5"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.6.6"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -2950,6 +2950,15 @@ void formatFreq(float f, char* buf, size_t len) {
 // whichever one this session has selected.
 // ---------------------------------------------------------------------
 void syncAudio() {
+  // Entering a session from anywhere except its own soundscape picker: sound
+  // starts Off - nothing plays until Tone or Nature is tapped. This must run
+  // BEFORE the sound source is chosen below; doing it later (in the screen
+  // redraw) let about one second of tone play first.
+  static Screen lastSyncScreen = SCR_WELCOME;
+  if (screen == SCR_RUN && lastSyncScreen != SCR_RUN && lastSyncScreen != SCR_SOUNDSCAPES) {
+    sessionSoundMode = AUDIO_SRC_OFF;
+  }
+  lastSyncScreen = screen;
   AudioSource src = AUDIO_SRC_OFF;
   int scapeIdx = -1;
   // Sound plays the whole time the session screen is open (and while
@@ -3629,11 +3638,6 @@ void loop() {
                  (screen == SCR_CATEGORY && showDeviceStats != lastDrawnShowDeviceStats) ||
                  (screen == SCR_SETTINGS && settingsPage != lastDrawnSettingsPage);
   if (changed) {
-    // Entering a session from anywhere except its own soundscape picker:
-    // sound starts Off - nothing plays until Tone or Nature is tapped.
-    if (screen == SCR_RUN && lastDrawnScreen != SCR_RUN && lastDrawnScreen != SCR_SOUNDSCAPES) {
-      sessionSoundMode = AUDIO_SRC_OFF;
-    }
     drawScreen(screen);
     lastDrawnScreen = screen;
     lastDrawnPage = listPage;
