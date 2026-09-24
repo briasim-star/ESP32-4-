@@ -117,7 +117,11 @@ static void renderTone(StereoFrame* out, int n) {
       advancePhase(phEnv, f);
     } else {
       l = r = fastSin(phL);
-      advancePhase(phL, f > DIRECT_MAX_HZ ? DIRECT_MAX_HZ : f);
+      float direct = f > DIRECT_MAX_HZ ? DIRECT_MAX_HZ : f;
+      // The onboard speaker can't reproduce low tones (100 Hz came out
+      // nearly silent) - raise by whole octaves (same note) until audible.
+      if (g_output == AUDIO_OUT_SPEAKER) while (direct < 390.0f) direct *= 2.0f;
+      advancePhase(phL, direct);
     }
     out[i].l = (int16_t)(l * amp);
     out[i].r = (int16_t)(r * amp);
@@ -238,7 +242,9 @@ static void refillRing() {
     if (chunk > RING_FRAMES - wp) chunk = RING_FRAMES - wp;
     if (chunk > (int)sizeof(readBuf) / bpf) chunk = sizeof(readBuf) / bpf;
     if (sndRemaining < (uint32_t)bpf) { // loop the file seamlessly
+      sdmedia_lock();
       sndFile.seek(sndDataStart);
+      sdmedia_unlock();
       sndRemaining = sndDataSize;
     }
     if ((uint32_t)(chunk * bpf) > sndRemaining) chunk = sndRemaining / bpf;
@@ -246,7 +252,7 @@ static void refillRing() {
     sdmedia_lock();
     int got = sndFile.read(readBuf, chunk * bpf) / bpf;
     sdmedia_unlock();
-    if (got <= 0) { sndFile.seek(sndDataStart); sndRemaining = sndDataSize; return; }
+    if (got <= 0) { sdmedia_lock(); sndFile.seek(sndDataStart); sdmedia_unlock(); sndRemaining = sndDataSize; return; }
     sndRemaining -= got * bpf;
 
     const int16_t* s = (const int16_t*)readBuf;

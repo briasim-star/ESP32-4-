@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.6"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -1215,13 +1215,50 @@ void drawSetupModeScreen() {
   drawButton(btnWellnessCenter, "Wellness Center");
 }
 
+bool tzFromSetup = false; // time zone screen opened by first setup (Done -> Home) vs Settings (Done -> Settings)
+
 void handleSetupModeTouch(int x, int y) {
   if (touchInRect(x, y, btnHomeUse)) {
     isWellnessCenter = false;
-    startTextEntry(ownerName, "What's your name?", SCR_CATEGORY, true);
+    tzFromSetup = true;
+    startTextEntry(ownerName, "What's your name?", SCR_TIMEZONE, true); // then pick a time zone
   } else if (touchInRect(x, y, btnWellnessCenter)) {
     isWellnessCenter = true;
-    startTextEntry(ownerName, "What's your name?", SCR_CATEGORY, true);
+    tzFromSetup = true;
+    startTextEntry(ownerName, "What's your name?", SCR_TIMEZONE, true);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Screen: time zone - every zone on one screen, tap yours, then Done.
+// Shown once during first setup and from Settings -> Time zone. Needs no
+// WiFi; the clock itself appears once WiFi is set up.
+// ---------------------------------------------------------------------
+Rect btnTzDone = {170, 260, 140, 44};
+Rect tzRect(int i) { Rect r = {18 + (i % 3) * 150, 52 + (i / 3) * 50, 144, 44}; return r; }
+
+void drawTimezoneScreen() {
+  drawAuroraBackground();
+  drawTopBar("Your time zone", !tzFromSetup, false);
+  int n = wifitime_tzCount();
+  if (n > 12) n = 12;
+  for (int i = 0; i < n; i++) {
+    bool on = (i == wifitime_tzIndex());
+    drawChamferButton(tzRect(i), wifitime_tzName(i), on ? tft.color565(12, 58, 68) : MADD_PANEL, on ? MADD_CYAN : MADD_EDGE, MADD_TEXT);
+  }
+  drawChamferButton(btnTzDone, "Done", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
+}
+
+void handleTimezoneTouch(int x, int y) {
+  if (!tzFromSetup && y < 36 && x < 300) { screen = SCR_SETTINGS; return; } // "< Your time zone" = back
+  int n = wifitime_tzCount();
+  if (n > 12) n = 12;
+  for (int i = 0; i < n; i++) {
+    if (touchInRect(x, y, tzRect(i))) { wifitime_setTz(i); return; } // same screen -> loop() repaints it
+  }
+  if (touchInRect(x, y, btnTzDone)) {
+    screen = tzFromSetup ? SCR_CATEGORY : SCR_SETTINGS;
+    tzFromSetup = false;
   }
 }
 
@@ -1890,9 +1927,9 @@ void handleSettingsItemTap(SettingsItemId id) {
       runTouchCalibration(); // blocking; Settings redraws right after
       screen = SCR_SETTINGS;
       break;
-    case SET_TIMEZONE: // each tap moves to the next zone
-      wifitime_setTz((wifitime_tzIndex() + 1) % wifitime_tzCount());
-      screen = SCR_SETTINGS;
+    case SET_TIMEZONE: // all zones on one screen
+      tzFromSetup = false;
+      screen = SCR_TIMEZONE;
       break;
     case SET_CHECKIN: {
       checkInEnabled = !checkInEnabled;
@@ -3705,6 +3742,7 @@ void drawScreen(Screen s) {
     case SCR_SEQUENCES:          drawSequencesScreen(); break;
     case SCR_SOUNDSCAPES:        drawSoundscapesScreen(); break;
     case SCR_WIFI_SETUP:         drawWifiSetupScreen(); break;
+    case SCR_TIMEZONE:           drawTimezoneScreen(); break;
   }
 }
 
@@ -4338,8 +4376,16 @@ void loop() {
   }
 
   // Resume point for a power loss: minutes left, saved once a minute
+  // Saving pauses the chip for a moment, which was heard as the soundscape
+  // "stopping and starting" - so with sound playing it saves only once, at
+  // the start; with sound off it keeps the minute-by-minute save.
   static unsigned long lastResumeSave = 0;
-  if (sessionTimerArmed && waveform_isRunning() && !programActive && selectedIndex >= 0 && millis() - lastResumeSave > 60000UL) {
+  static bool savedThisSession = false;
+  if (!waveform_isRunning()) savedThisSession = false;
+  bool soundOn = audio_getSource() != AUDIO_SRC_OFF;
+  if (sessionTimerArmed && waveform_isRunning() && !programActive && selectedIndex >= 0 &&
+      (soundOn ? !savedThisSession : millis() - lastResumeSave > 60000UL)) {
+    savedThisSession = true;
     lastResumeSave = millis();
     int left = timerMinutes - (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
     if (left > 0) saveResumePoint(left);
@@ -4391,6 +4437,7 @@ void loop() {
       case SCR_SEQUENCES:          handleSequencesTouch(tx, ty); break;
       case SCR_SOUNDSCAPES:        handleSoundscapesTouch(tx, ty); break;
       case SCR_WIFI_SETUP:         handleWifiSetupTouch(tx, ty); break;
+      case SCR_TIMEZONE:           handleTimezoneTouch(tx, ty); break;
     }
     if (screen == before) needsRefresh = true;
     // Handlers that painted a temporary message (greeting, "checking for
