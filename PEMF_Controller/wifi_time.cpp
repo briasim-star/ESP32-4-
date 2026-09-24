@@ -136,9 +136,14 @@ void wifitime_cancelPortal() {
   WiFi.mode(WIFI_OFF);
 }
 
+// Erases the saved network WITHOUT turning the WiFi radio on. The old way
+// (WiFiManager::resetSettings) switched WiFi on, which could run the board
+// out of memory while Bluetooth was running and crash it.
 void wifitime_forgetNetwork() {
-  WiFiManager wmTemp;
-  wmTemp.resetSettings();
+  Preferences p;
+  p.begin("nvs.net80211", false); // the WiFi driver's own saved-network store
+  p.clear();
+  p.end();
   setMarkedConfigured(false);
   g_timeSynced = false;
 }

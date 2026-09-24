@@ -9,6 +9,7 @@
 #include <Preferences.h>
 #include <esp_gap_bt_api.h>
 #include <esp_bt.h>
+#include <esp_heap_caps.h>
 #include <math.h>
 
 // ============================================================================
@@ -136,13 +137,14 @@ static int ringPull(StereoFrame* out, int n) {
   portEXIT_CRITICAL(&ringMux);
 
   int take = n < filled ? n : filled;
+  if (take <= 0) { memset(out, 0, n * sizeof(StereoFrame)); g_underruns++; return 0; }
   int first = RING_FRAMES - rp;
   if (first > take) first = take;
   memcpy(out, sndRing + rp, first * sizeof(StereoFrame));
   if (take > first) memcpy(out + first, sndRing, (take - first) * sizeof(StereoFrame));
 
   portENTER_CRITICAL(&ringMux);
-  if (gen == ringGen) {
+  if (gen == ringGen && ringReadPos == rp && ringFilled >= take) { // nobody else pulled meanwhile
     ringReadPos = (rp + take) % RING_FRAMES;
     ringFilled -= take;
   }
@@ -597,7 +599,16 @@ void audio_begin() {
 }
 
 void audio_setOutput(AudioOutput out) {
-  if (out == AUDIO_OUT_SPEAKER && !g_speakerReady) speakerInit();
+  if (out == AUDIO_OUT_SPEAKER && !g_speakerReady) {
+    // The speaker driver needs ~7 KB of DMA memory. With Bluetooth holding
+    // most of the RAM, installing it could crash the board - stay on
+    // Bluetooth instead (the speaker is used after the next restart).
+    if (g_btStarted && heap_caps_get_largest_free_block(MALLOC_CAP_DMA) < 24000) {
+      Serial.println("[AUDIO] not enough memory for the speaker while Bluetooth runs - staying on Bluetooth");
+      return;
+    }
+    speakerInit();
+  }
   g_output = out;
   audio_setVolume(g_volumePercent); // the volume scale differs per output
 }
@@ -706,8 +717,8 @@ bool audio_btIsConnected() { return g_btStarted && a2dp.is_connected(); }
 
 void audio_btEnd(bool releaseMemory) {
   if (g_btStarted) {
+    g_btStarted = false; // first, so the audio task stops talking to a stack that's shutting down
     a2dp.end(releaseMemory);
-    g_btStarted = false;
   }
 }
 

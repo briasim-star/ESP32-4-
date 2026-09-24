@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.5"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1907,7 +1907,11 @@ void drawWifiSetupScreen() {
 void handleWifiSetupTouch(int x, int y) {
   if (touchInRect(x, y, btnWifiCancel)) {
     wifitime_cancelPortal();
-    if (restartAfterWifiSetup) ESP.restart(); // brings Bluetooth back
+    if (restartAfterWifiSetup) { // brings Bluetooth back - say so, so it doesn't look like a crash
+      drawBootBanner("Restarting to bring Bluetooth back...", MADD_CYAN);
+      delay(1500);
+      ESP.restart();
+    }
     screen = SCR_SETTINGS;
   }
 }
@@ -2370,10 +2374,11 @@ void runPendingUpdateCheck() {
   };
 
   show("Checking for updates...", "Connecting to WiFi");
-  esp_task_wdt_init(45, true);
+  esp_task_wdt_init(90, true); // WiFi 15 s + three 15 s network timeouts must fit inside this
   esp_task_wdt_add(NULL);
   bool newer = ota_checkForUpdate();
   esp_task_wdt_delete(NULL);
+  esp_task_wdt_init(5, false);  // back to the normal, non-panicking watchdog
   if (!newer) {
     if (strlen(ota_lastErrorMessage()) > 0) show("Couldn't check for updates", ota_lastErrorMessage());
     else {
@@ -2387,10 +2392,11 @@ void runPendingUpdateCheck() {
   char msg[48];
   snprintf(msg, sizeof(msg), "Installing version %s", ota_latestVersionString());
   show(msg, "Please keep the power on - about 1 minute.");
-  esp_task_wdt_init(45, true);
+  esp_task_wdt_init(90, true);
   esp_task_wdt_add(NULL);
   ota_downloadAndInstall(); // restarts into the new version on success
   esp_task_wdt_delete(NULL);
+  esp_task_wdt_init(5, false);
   show("Update didn't finish", ota_lastErrorMessage());
   waitForTapOrTimeout(20000);
 }
@@ -2783,6 +2789,13 @@ uint16_t categoryColor(Category c) {
     if (HOME_TILES[i].kind == TILE_CATEGORY && HOME_TILES[i].cat == c) return tileColor(HOME_TILES[i].colorIdx);
   return MADD_MAGENTA;
 }
+// Sleep Night card: fills the empty third row of the Sleep list.
+Rect btnSleepNight = {18, 160, 444, 48};
+void openSleepSetup(); // defined with Sleep Night, further down
+bool showSleepNightCard(int total) {
+  return !viewingFavorites && currentCategory == CAT_HEART_CIRC && listPage == 0 && total <= 4;
+}
+
 // 2 x 3 grid of presets on the MADD background, each with its category color.
 void drawListScreen() {
   drawAuroraBackground();
@@ -2812,6 +2825,13 @@ void drawListScreen() {
       drawFittedText(r.x + 14, r.y + 27, r.w - 22, f, FONT_SM, MADD_CYAN, MADD_PANEL);
     }
   }
+  if (showSleepNightCard(total)) {
+    drawChamfer(btnSleepNight, MADD_PANEL, tileColor(5), 8);
+    tft.fillCircle(46, btnSleepNight.y + 24, 13, MADD_TEXT);       // crescent moon
+    tft.fillCircle(53, btnSleepNight.y + 19, 12, MADD_PANEL);
+    drawFittedText(76, btnSleepNight.y + 8, 370, "Sleep Night", FONT_SM, MADD_TEXT, MADD_PANEL);
+    drawFittedText(76, btnSleepNight.y + 27, 370, "Sound only, all night - the screen goes dark", FONT_SM, MADD_CYAN, MADD_PANEL);
+  }
   drawPagerRow(btnPrevPage, btnBackFromList, btnNextPage, listPage, (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE);
 }
 
@@ -2831,6 +2851,7 @@ void handleListTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
   if (y < 36 && x < 300) { screen = SCR_CATEGORY; return; } // "< title" = back
   int total = listCount();
+  if (showSleepNightCard(total) && touchInRect(x, y, btnSleepNight)) { openSleepSetup(); return; }
   int start = listPage * ITEMS_PER_PAGE;
   for (int i = 0; i < ITEMS_PER_PAGE; i++) {
     int idx = start + i;
@@ -3462,6 +3483,7 @@ void handleRunTouch(int x, int y) {
     } else {
       sessionForceSpeaker = !sessionForceSpeaker;
       applyAudioOutput();
+      if (sessionForceSpeaker && audio_getOutput() != AUDIO_OUT_SPEAKER) sessionForceSpeaker = false; // memory too tight - stayed on Bluetooth
     }
   }
 }
@@ -3804,11 +3826,88 @@ void serviceSleepSerial() {
   }
 }
 
+// ---- Sleep Night setup: pick the sound (it plays as you choose) and length ----
+bool sleepSetupOn = false, sleepSetupDraw = false;
+int sleepSetupScape = -1, sleepSetupLen = 2;
+const int SLEEP_LENGTHS[4] = {120, 180, 300, 480};
+const char* SLEEP_LEN_LABELS[4] = {"2 h", "3 h", "5 h", "8 h"};
+const Rect slPrev = {40, 88, 70, 50}, slName = {120, 88, 240, 50}, slNext = {370, 88, 70, 50};
+const Rect slBack = {40, 236, 180, 56}, slStart = {260, 236, 180, 56};
+Rect slLenRect(int i) { Rect r = {40 + i * 108, 160, 96, 48}; return r; }
+
+void drawSleepSetup() {
+  drawAuroraBackground();
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+  tft.drawString("Sleep Night", 240, 34);
+  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+  tft.drawString("Sound only. The coils stay off.", 240, 64);
+  tft.setTextDatum(TL_DATUM);
+  drawChamferButton(slPrev, "<", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  drawChamferButton(slNext, ">", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  char name[24];
+  prettySoundName(sleepSetupScape, name, sizeof(name));
+  drawChamferButton(slName, name, MADD_PANEL, MADD_CYAN, MADD_TEXT, FONT_LG);
+  for (int i = 0; i < 4; i++) {
+    bool on = (i == sleepSetupLen);
+    drawChamferButton(slLenRect(i), SLEEP_LEN_LABELS[i], on ? tft.color565(40, 30, 64) : MADD_PANEL, on ? MADD_CYAN : MADD_EDGE, MADD_TEXT, FONT_LG);
+  }
+  drawChamferButton(slBack, "Back", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
+  drawChamferButton(slStart, "Start", MADD_PANEL, MADD_MAGENTA, MADD_TEXT, FONT_LG);
+}
+
+// Called from the Sleep list. Drawn on the next pass, after the list's own tap handling.
+void openSleepSetup() {
+  if (sdmedia_soundscapeCount() == 0) {
+    drawBootBanner("Add sound files to the SD card first", COLOR_WARN);
+    return;
+  }
+  if (sleepSetupScape < 0 || sleepSetupScape >= sdmedia_soundscapeCount()) sleepSetupScape = defaultSoundscapeFor("sleep", 1.0f);
+  sleepSetupOn = true;
+  sleepSetupDraw = true;
+}
+
+void serviceSleepSetup(bool press, int tx, int ty) {
+  if (sleepSetupDraw) {
+    sleepSetupDraw = false;
+    audio_setNightShape(1.0f, 0.0f);
+    audio_setSoundscapeFile(sdmedia_soundscapePath(sleepSetupScape));
+    audio_setSource(AUDIO_SRC_SOUNDSCAPE);          // preview while choosing
+    drawSleepSetup();
+    return;
+  }
+  if (!press) return;
+  int n = sdmedia_soundscapeCount();
+  bool redraw = false;
+  if (touchInRect(tx, ty, slPrev) || touchInRect(tx, ty, slNext)) {
+    sleepSetupScape = (sleepSetupScape + (touchInRect(tx, ty, slNext) ? 1 : n - 1)) % n;
+    audio_setSoundscapeFile(sdmedia_soundscapePath(sleepSetupScape));
+    redraw = true;
+  }
+  for (int i = 0; i < 4; i++) if (touchInRect(tx, ty, slLenRect(i))) { sleepSetupLen = i; redraw = true; }
+  uint16_t x, y;
+  if (touchInRect(tx, ty, slBack)) {
+    sleepSetupOn = false;
+    audio_setSource(AUDIO_SRC_OFF);
+    fullRedrawRequested = true;
+    while (tft.getTouch(&x, &y)) delay(20);
+    return;
+  }
+  if (touchInRect(tx, ty, slStart)) {
+    sleepSetupOn = false;
+    startSleepNight((unsigned long)SLEEP_LENGTHS[sleepSetupLen], sleepSetupScape);
+    while (tft.getTouch(&x, &y)) delay(20);
+    return;
+  }
+  if (redraw) drawSleepSetup();
+}
+
 // Called at the top of loop(). Returns true while Sleep Night owns the device.
 bool serviceSleepNight(bool touched, int tx, int ty) {
   static bool wasDown = false;
   bool press = touched && !wasDown;
   wasDown = touched;
+  if (sleepSetupOn) { serviceSleepSetup(press, tx, ty); return true; }
   if (sleepDarkAfter && !sleepNightOn) {
     if (!press) return true;
     sleepDarkAfter = false;
@@ -3858,6 +3957,7 @@ void resumeSleepNightIfSaved() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("[BOOT] reset reason %d (3=restart 4=crash 5/6=watchdog)\n", (int)esp_reset_reason()); // USB only
   // Waking from "off": release the pins that were locked safe for sleep.
   gpio_deep_sleep_hold_dis();
   const gpio_num_t heldPins[] = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL, (gpio_num_t)AUDIO_ENABLE };

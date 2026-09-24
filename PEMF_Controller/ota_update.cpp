@@ -22,6 +22,7 @@ static bool ensureWifiConnected() {
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < OTA_WIFI_TIMEOUT_MS) {
     delay(100);
+    esp_task_wdt_reset(); // still making progress - don't let the update watchdog fire
   }
   return WiFi.status() == WL_CONNECTED;
 }
