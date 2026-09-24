@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.5"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.6"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -585,18 +585,30 @@ void topStatusText(char* buf, size_t len) {
   }
 }
 
+// Top-right status badge: a small panel with a colored dot and where the
+// sound goes ("X20" / "Speaker"). Dot: green = connected, amber = working
+// on it or not found, cyan = device speaker.
 char lastTopStatus[24] = "";
 void drawTopStatus(bool force) {
-  char buf[24];
-  topStatusText(buf, sizeof(buf));
-  if (!force && strcmp(buf, lastTopStatus) == 0) return;
-  strcpy(lastTopStatus, buf);
-  fillAurora(300, 6, 164, 24);
+  char key[24];
+  topStatusText(key, sizeof(key));
+  if (!force && strcmp(key, lastTopStatus) == 0) return;
+  strcpy(lastTopStatus, key);
+  fillAurora(300, 6, 164, 30);
+  const char* label = "Speaker";
+  uint16_t dot = MADD_CYAN;
+  if (audioUsingBluetooth()) {
+    label = strlen(btDeviceName) > 0 ? btDeviceName : "Bluetooth";
+    BtStatus st = audio_btStatus();
+    dot = st == BT_STATUS_CONNECTED ? COLOR_GOOD : st == BT_STATUS_NOT_FOUND ? COLOR_WARN : MADD_SPECTRUM[0];
+  }
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(audioUsingBluetooth() ? btStatusColor() : MADD_DIM);
-  tft.setTextDatum(TR_DATUM);
-  tft.drawString(buf, 460, 12);
-  tft.setTextDatum(TL_DATUM);
+  int w = tft.textWidth(label) + 34;
+  if (w > 160) w = 160;
+  Rect r = {462 - w, 7, w, 26};
+  drawChamfer(r, MADD_PANEL, MADD_EDGE, 6);
+  tft.fillCircle(r.x + 13, r.y + 13, 4, dot);
+  drawFittedText(r.x + 24, r.y + 5, w - 30, label, FONT_SM, MADD_TEXT, MADD_PANEL);
 }
 
 // Top bar: badge + title on the left, live status on the right, spectrum stripe under it.
@@ -2887,10 +2899,12 @@ Rect btnSndScape      = {382, 70, 74, 34};
 Rect btnPickSound     = {240, 108, 216, 22};
 Rect btnPwrMinus      = {240, 136, 48, 34};
 Rect btnPwrPlus       = {408, 136, 48, 34};
-Rect btnVolMinus      = {240, 194, 48, 34};
-Rect btnVolPlus       = {408, 194, 48, 34};
-Rect btnTmrMinus      = {240, 234, 48, 34};
-Rect btnTmrPlus       = {408, 234, 48, 34};
+Rect btnVolMinus      = {240, 190, 48, 34};
+Rect btnVolPlus       = {408, 190, 48, 34};
+Rect btnTmrMinus      = {240, 228, 48, 34};
+Rect btnTmrPlus       = {408, 228, 48, 34};
+Rect btnOutBt         = {240, 266, 132, 28};  // where the sound plays: [ X20 | Device ]
+Rect btnOutDev        = {376, 266, 80, 28};
 static const int RUN_HEX_X = 112, RUN_HEX_Y = 142, RUN_HEX_R = 58;
 
 unsigned long sessionStartMillis = 0;
@@ -3214,6 +3228,27 @@ void drawRunHexContents(const char* timeText, const char* freqText) {
   tft.setTextDatum(TL_DATUM);
 }
 
+// Bottom of the session panel: where the sound plays, styled like the
+// Off / Tone / Nature buttons - the lit half is the one playing.
+void drawOutputRow() {
+  uint16_t onFill = tft.color565(12, 58, 68);
+  Rect whole = {btnOutBt.x, btnOutBt.y, btnOutDev.x + btnOutDev.w - btnOutBt.x, btnOutBt.h};
+  tft.fillRect(whole.x, whole.y, whole.w, whole.h, MADD_PANEL);
+  if (audioOutputPref != AUDIO_OUT_BLUETOOTH || strlen(btDeviceName) == 0) {
+    drawChamferButton(whole, "Device speaker", onFill, MADD_CYAN, MADD_TEXT);
+    return;
+  }
+  bool onBt = !sessionForceSpeaker;
+  BtStatus st = audio_btStatus();
+  char label[24];
+  if (onBt && st == BT_STATUS_NOT_FOUND) snprintf(label, sizeof(label), "Retry %s", btDeviceName);
+  else if (onBt && st != BT_STATUS_CONNECTED) snprintf(label, sizeof(label), "%s...", btDeviceName);
+  else snprintf(label, sizeof(label), "%s", btDeviceName);
+  uint16_t btEdge = !onBt ? MADD_EDGE : (st == BT_STATUS_CONNECTED ? MADD_CYAN : COLOR_WARN);
+  drawChamferButton(btnOutBt, label, onBt ? onFill : MADD_PANEL, btEdge, MADD_TEXT);
+  drawChamferButton(btnOutDev, "Device", onBt ? MADD_PANEL : onFill, onBt ? MADD_EDGE : MADD_CYAN, MADD_TEXT);
+}
+
 void drawCountdownOnly() {
   char timeBuf[24];
   if (startCountdownAt) {
@@ -3247,8 +3282,7 @@ void drawCountdownOnly() {
   char status[32];
   outputStatusText(status, sizeof(status));
   if (strcmp(status, lastStatusText) != 0) {
-    tft.fillRect(240, 276, 218, 18, MADD_PANEL);
-    drawFittedText(240, 278, 216, status, FONT_SM, audioUsingBluetooth() ? btStatusColor() : MADD_DIM, MADD_PANEL);
+    drawOutputRow();
     strcpy(lastStatusText, status);
   }
   drawTopStatus(false);
@@ -3475,15 +3509,17 @@ void handleRunTouch(int x, int y) {
     screen = SCR_SOUNDSCAPES; // the session keeps running while picking
     return;
   }
-  // Tapping the status line: retry Bluetooth if it wasn't found, otherwise
-  // switch between the Bluetooth speaker and the device's own speaker.
-  if (x >= 236 && y >= 270 && y < 304 && audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0) {
-    if (!sessionForceSpeaker && audio_btStatus() == BT_STATUS_NOT_FOUND) {
-      audio_btRetry();
-    } else {
-      sessionForceSpeaker = !sessionForceSpeaker;
+  // [ X20 | Device ]: tap the other half to move the sound there. Tapping
+  // the Bluetooth half while it wasn't found retries the connection.
+  if (audioOutputPref == AUDIO_OUT_BLUETOOTH && strlen(btDeviceName) > 0) {
+    bool onBt = !sessionForceSpeaker;
+    if (touchInRect(x, y, btnOutBt)) {
+      if (!onBt) { sessionForceSpeaker = false; applyAudioOutput(); }
+      else if (audio_btStatus() == BT_STATUS_NOT_FOUND) audio_btRetry();
+    } else if (onBt && touchInRect(x, y, btnOutDev)) {
+      sessionForceSpeaker = true;
       applyAudioOutput();
-      if (sessionForceSpeaker && audio_getOutput() != AUDIO_OUT_SPEAKER) sessionForceSpeaker = false; // memory too tight - stayed on Bluetooth
+      if (audio_getOutput() != AUDIO_OUT_SPEAKER) sessionForceSpeaker = false; // memory too tight - stayed on Bluetooth
     }
   }
 }
