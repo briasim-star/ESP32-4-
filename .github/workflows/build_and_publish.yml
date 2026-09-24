@@ -52,6 +52,13 @@ jobs:
             --output-dir build_output \
             PEMF_Controller/PEMF_Controller.ino
 
+      - name: Check the firmware fits its update slot
+        run: |
+          SIZE=$(stat -c%s build_output/PEMF_Controller.ino.bin)
+          MAX=2031616   # 0x1F0000 - one app slot in PEMF_Controller/partitions.csv
+          echo "firmware.bin is $SIZE bytes (limit $MAX)"
+          if [ "$SIZE" -gt "$MAX" ]; then echo "::error::Firmware is too big for wireless updates - trim it before publishing."; exit 1; fi
+
       - name: Collect binaries for the web installer
         run: |
           mkdir -p docs/firmware
