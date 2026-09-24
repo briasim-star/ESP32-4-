@@ -278,6 +278,12 @@ static void serviceSoundscapeFile() {
 // The one renderer. Handles smooth fades whenever the source changes
 // (Off <-> Tone <-> Soundscape) so there are no clicks.
 // ---------------------------------------------------------------------------
+// Chime: a soft bell (sine with a smooth decay) layered on top of whatever
+// is playing - used at session start and end. Generated, no sound files.
+static volatile uint32_t chimeLeft = 0, chimeTotal = 0;
+static volatile float chimeHz = 660.0f;
+static float chimePhase = 0;
+
 static AudioSource renderingSource = AUDIO_SRC_OFF;
 static const float SCAPE_GAIN = 0.6f; // nature was already loud - this offsets the 1.6.3 volume raise so only the tone gets louder // no boost - boosting clipped the loud parts (rain hits, thunder) into static
 // Gentle limiter: below ~73% of full scale nothing changes; above it, peaks
@@ -320,6 +326,25 @@ static void renderFrames(StereoFrame* out, int n) {
     renderingSource = want;
     phL = phR = phEnv = 0;
   }
+
+  if (chimeLeft > 0) {
+    float amp = 32767.0f * 0.30f * (vol > 1.0f ? 1.0f : vol);
+    for (int i = 0; i < n && chimeLeft > 0; i++, chimeLeft--) {
+      float t = (float)chimeLeft / (float)chimeTotal;   // 1 -> 0 over the chime
+      float attack = (chimeTotal - chimeLeft) < 400 ? (chimeTotal - chimeLeft) / 400.0f : 1.0f; // no click
+      float s = fastSin(chimePhase) * t * t * attack * amp;
+      advancePhase(chimePhase, chimeHz);
+      out[i].l = softLimit(out[i].l + s);
+      out[i].r = softLimit(out[i].r + s);
+    }
+  }
+}
+
+void audio_chime(float hz, uint16_t ms) {
+  chimeHz = hz;
+  chimePhase = 0;
+  chimeTotal = (uint32_t)AUD_SAMPLE_RATE * ms / 1000;
+  chimeLeft = chimeTotal;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +387,7 @@ static void speakerPump() {
 
   renderFrames(spkFrames, 256);
 
-  bool audible = (renderingSource != AUDIO_SRC_OFF) || (g_source != AUDIO_SRC_OFF);
+  bool audible = (renderingSource != AUDIO_SRC_OFF) || (g_source != AUDIO_SRC_OFF) || chimeLeft > 0;
   if (audible) {
     silentSince = 0;
     if (!ampOn) { digitalWrite(AUDIO_ENABLE, LOW); ampOn = true; }

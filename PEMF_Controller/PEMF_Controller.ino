@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.6.6"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.7.0"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -2435,7 +2435,7 @@ static const HomeTileDef HOME_TILES[9] = {
   {"Athletic", TILE_CATEGORY, CAT_PAIN_RECOVERY,    0},
   {"Body",     TILE_CATEGORY, CAT_BONE_JOINT,       1},
   {"Skin",     TILE_CATEGORY, CAT_SKIN_WOUND,       3},
-  {"Guided", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
+  {"Journeys", TILE_PROGRAMS, CAT_BONE_JOINT,      -1},
   {"Custom",   TILE_CUSTOM,   CAT_BONE_JOINT,      -2},
   {"Settings", TILE_SETTINGS, CAT_BONE_JOINT,      -2},
 };
@@ -2598,7 +2598,7 @@ void getSequenceFreqRange(int idx, char* buf, size_t bufLen) {
 
 void drawSequencesScreen() {
   drawAuroraBackground();
-  drawTopBar("Guided Sessions", true, true);
+  drawTopBar("Resonance Journeys", true, true);
 
   int start = sequencesPage * SEQUENCES_PER_PAGE;
   for (int i = 0; i < SEQUENCES_PER_PAGE; i++) {
@@ -2629,7 +2629,7 @@ void handleSequencesTouch(int x, int y) {
       selName = p.name;
       selFreq = p.steps[0].freqHz;
       selWave = p.steps[0].wave;
-      selCategoryName = "Guided Sessions";
+      selCategoryName = "Journeys";
       selectedIndex = -1;
       pendingSequenceIndex = idx;
       runScreenOrigin = SCR_SEQUENCES;
@@ -2902,6 +2902,44 @@ void stopProgram() {
   programActive = false;
 }
 
+// ---- Session start ritual + completion ----------------------------------
+// START begins a 3-2-1 countdown; then the coil starts at the lowest power
+// and glides up to the chosen level over 3 s (soft start), with a chime.
+// When a session finishes on its own, a chime plays and a summary card shows.
+unsigned long startCountdownAt = 0;   // 0 = no countdown running
+unsigned long rampStartMs = 0;        // 0 = not ramping
+bool runControlsDirty = false;        // loop() repaints the Run controls when set
+bool sessionCompleteShow = false;
+int completedMinutes = 0;
+float completedFreq = 0;
+const char* completedName = "";
+extern bool fullRedrawRequested;
+
+void markSessionComplete(int mins) {
+  completedMinutes = mins;
+  completedFreq = selFreq;
+  completedName = selName;
+  sessionCompleteShow = true;
+  runControlsDirty = true;
+  audio_chime(440.0f, 1200); // lower, longer bell = "finished"
+}
+
+// Called from loop() when the countdown ends.
+void beginSessionNow() {
+  if (pendingSequenceIndex >= 0) {
+    startProgram(SEQUENCES[pendingSequenceIndex]);
+    pendingSequenceIndex = -1;
+  } else {
+    waveform_start(selFreq, selWave, actualIntensityPercent());
+  }
+  waveform_setIntensity(1);  // soft start: begin at the lowest power...
+  rampStartMs = millis();    // ...and glide up (see loop)
+  sessionStartMillis = millis();
+  sessionTimerArmed = (timerMinutes > 0);
+  audio_chime(660.0f, 700);  // brighter bell = "starting"
+  runControlsDirty = true;
+}
+
 void updateProgram() {
   if (!programActive || sessionPaused) return;
   if (millis() - lastProgramUpdateMillis < 1000) return;
@@ -2920,8 +2958,12 @@ void updateProgram() {
   if (elapsedMs >= durMs) {
     programStepIndex++;
     if (programStepIndex >= currentProgram.stepCount) {
+      int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
+      addLogEntry(selName, selFreq, mins); // finished Journeys are logged too
       stopProgram();
       waveform_stop();
+      sessionTimerArmed = false;
+      markSessionComplete(mins);
       return;
     }
     ProgramStep& next = currentProgram.steps[programStepIndex];
@@ -3062,7 +3104,10 @@ void drawRunHexContents(const char* timeText, const char* freqText) {
 
 void drawCountdownOnly() {
   char timeBuf[24];
-  if (sessionTimerArmed && (waveform_isRunning() || sessionPaused)) {
+  if (startCountdownAt) {
+    long left = 3 - (long)((millis() - startCountdownAt) / 1000UL);
+    snprintf(timeBuf, sizeof(timeBuf), "%ld", left < 1 ? 1 : left);
+  } else if (sessionTimerArmed && (waveform_isRunning() || sessionPaused)) {
     unsigned long elapsedSec = (sessionEffectiveMillis() - sessionStartMillis) / 1000UL;
     long remainingSec = (long)timerMinutes * 60 - (long)elapsedSec;
     if (remainingSec < 0) remainingSec = 0;
@@ -3140,7 +3185,8 @@ void drawPowerMeter() {
 // Everything that can change from a tap while staying on the Run screen.
 void refreshRunControls() {
   bool running = waveform_isRunning();
-  if (sessionPaused)      drawChamferButton(btnStartStop, "Resume", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
+  if (startCountdownAt)   drawChamferButton(btnStartStop, "Cancel", MADD_PANEL, MADD_DIM, MADD_TEXT, FONT_LG);
+  else if (sessionPaused) drawChamferButton(btnStartStop, "Resume", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
   else if (running)       drawChamferButton(btnStartStop, "Pause", tft.color565(90, 54, 6), MADD_SPECTRUM[0], MADD_TEXT, FONT_LG);
   else                    drawChamferButton(btnStartStop, "Start", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
   drawChamferButton(btnBackFromRun, "Stop", tft.color565(58, 13, 26), MADD_SPECTRUM[2], MADD_TEXT);
@@ -3185,6 +3231,25 @@ void refreshRunControls() {
   drawValueRow(btnTmrMinus, btnTmrPlus, buf);
 
   drawCountdownOnly();
+
+  if (sessionCompleteShow) { // summary card over the coil area; any tap closes it
+    Rect c = {14, 52, 212, 196};
+    drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+    drawHexBadge(120, 82, 16);
+    tft.setTextDatum(TC_DATUM);
+    tft.setFreeFont(FONT_LG);
+    tft.setTextColor(MADD_TEXT);
+    tft.drawString("Complete", 120, 104);
+    tft.setTextDatum(TL_DATUM);
+    char line[40], f[16];
+    drawFittedText(28, 138, 184, completedName, FONT_SM, MADD_CYAN, MADD_PANEL);
+    formatFreq(completedFreq, f, sizeof(f));
+    snprintf(line, sizeof(line), "%d min  at  %s", completedMinutes, f);
+    drawFittedText(28, 162, 184, line, FONT_SM, MADD_TEXT, MADD_PANEL);
+    snprintf(line, sizeof(line), "%lu sessions all-time", lifetimeSessionCount);
+    drawFittedText(28, 186, 184, line, FONT_SM, MADD_DIM, MADD_PANEL);
+    drawFittedText(28, 216, 184, "Tap to close", FONT_SM, MADD_DIM, MADD_PANEL);
+  }
 }
 
 // Pulses the coil rings in step with the session (visible up to ~4 Hz).
@@ -3205,6 +3270,8 @@ void updateRunPulse() {
 }
 
 void endSession() {
+  startCountdownAt = 0; // cancel a 3-2-1 in progress
+  rampStartMs = 0;
   if (sessionForceSpeaker) { sessionForceSpeaker = false; applyAudioOutput(); } // back to the Bluetooth speaker
   if (waveform_isRunning() || sessionPaused) {
     int mins = (int)((sessionEffectiveMillis() - sessionStartMillis) / 60000UL);
@@ -3217,7 +3284,14 @@ void endSession() {
 }
 
 void handleRunTouch(int x, int y) {
+  if (sessionCompleteShow) { // any tap closes the summary card
+    sessionCompleteShow = false;
+    fullRedrawRequested = true;
+    return;
+  }
   if (touchInRect(x, y, btnRunTitle) || touchInRect(x, y, btnBackFromRun)) {
+    startCountdownAt = 0;
+    rampStartMs = 0;
     endSession();
     screen = runScreenOrigin;
     return;
@@ -3265,15 +3339,10 @@ void handleRunTouch(int x, int y) {
       sessionPaused = true;
       pauseStartMillis = millis();
       waveform_stop();
-    } else if (pendingSequenceIndex >= 0) {
-      startProgram(SEQUENCES[pendingSequenceIndex]);
-      pendingSequenceIndex = -1;
-      sessionStartMillis = millis();
-      sessionTimerArmed = (timerMinutes > 0);
+    } else if (startCountdownAt) {
+      startCountdownAt = 0;         // tapped "Cancel" during 3-2-1
     } else {
-      waveform_start(selFreq, selWave, actualIntensityPercent());
-      sessionStartMillis = millis();
-      sessionTimerArmed = (timerMinutes > 0);
+      startCountdownAt = millis();  // 3-2-1, then beginSessionNow() from loop()
     }
     return;
   }
@@ -3470,6 +3539,33 @@ int lastDrawnSoundscapesPage = -1;
 int lastDrawnSettingsPage = -1;
 bool lastDrawnShowDeviceStats = false;
 
+// Power-on animation: the MADD hex badge grows in, its color bands fill one
+// by one, then the name appears. About 1.5 s, and Bluetooth is already
+// connecting in the background while it plays.
+void playStartupAnimation() {
+  drawAuroraBackground();
+  const int cx = 240, cy = 120;
+  for (int r = 10; r <= 64; r += 9) {
+    drawHex(cx, cy, r, MADD_PANEL, MADD_MAGENTA);
+    delay(35);
+  }
+  const int bw = 64, bh = 22;
+  const int bandColor[4] = {0, 2, 4, 5};
+  for (int i = 0; i < 4; i++) {
+    tft.fillRect(cx - bw / 2, cy - 2 * bh + i * bh + 1, bw, bh - 2, MADD_SPECTRUM[bandColor[i]]);
+    delay(110);
+  }
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_XL);
+  tft.setTextColor(MADD_TEXT);
+  tft.drawString("MADD PEMF", 240, 222);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(MADD_DIM);
+  tft.drawString("by The MADD Resonist", 240, 258);
+  tft.setTextDatum(TL_DATUM);
+  delay(700);
+}
+
 void setup() {
   Serial.begin(115200);
   // Waking from "off": release the pins that were locked safe for sleep.
@@ -3504,12 +3600,14 @@ void setup() {
   audio_setBtDeviceName(btDeviceName);
   if (!updatePending) applyAudioOutput();
 
+  playStartupAnimation(); // Bluetooth keeps connecting in the background meanwhile
+
   // SD card: splash + soundscape list. Missing card = plain screens, no sounds.
   bool sdOk = sdmedia_begin();
   Serial.printf("SD card mount: %s\n", sdOk ? "OK" : "FAILED");
   if (sdOk && sdmedia_showSplash()) {
     splashOnScreen = true;
-    delay(1500);
+    delay(1200);
   }
   Serial.printf("Soundscapes found: %d\n", sdmedia_scanSoundscapes());
 
@@ -3564,6 +3662,20 @@ void loop() {
     }
   }
 
+  // 3-2-1 finished: start the coil (soft start) and chime.
+  if (startCountdownAt && millis() - startCountdownAt >= 3000) {
+    startCountdownAt = 0;
+    beginSessionNow();
+  }
+  // Soft start: glide from the lowest power up to the chosen level over 3 s.
+  if (rampStartMs && waveform_isRunning()) {
+    float k = (millis() - rampStartMs) / 3000.0f;
+    if (k >= 1.0f) { k = 1.0f; rampStartMs = 0; }
+    int target = actualIntensityPercent();
+    int now = (int)(target * k);
+    waveform_setIntensity(now < 1 ? 1 : now);
+  }
+
   updateProgram();
 
   // Auto-stop when the session timer elapses
@@ -3572,9 +3684,11 @@ void loop() {
     unsigned long elapsedMin = (millis() - sessionStartMillis) / 60000UL;
     if ((int)elapsedMin >= timerMinutes) {
       endSession();
+      markSessionComplete((int)elapsedMin);
       runNeedsRefresh = true;
     }
   }
+  if (runControlsDirty) { runControlsDirty = false; runNeedsRefresh = true; }
   // A Sequence can also finish on its own
   static bool wasRunning = false;
   if (wasRunning && !waveform_isRunning() && !sessionPaused) runNeedsRefresh = true;
@@ -3658,7 +3772,7 @@ void loop() {
   // frequency, BT status) - each only repaints if its text changed.
   if (screen == SCR_RUN) {
     static unsigned long lastTick = 0;
-    if (millis() - lastTick >= 1000) {
+    if (millis() - lastTick >= (startCountdownAt ? 200UL : 1000UL)) {
       drawCountdownOnly();
       lastTick = millis();
     }
