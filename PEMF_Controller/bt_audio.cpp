@@ -55,7 +55,7 @@ static const float CARRIER_HZ = 200.0f;
 static const float BINAURAL_MAX_HZ = 30.0f;
 static const float AUDIBLE_HZ = 100.0f;
 static const float DIRECT_MAX_HZ = 1000.0f;
-static const float TONE_LEVEL = 0.85f; // of full scale, before volume (was 0.55 - too quiet out of the box)
+static const float TONE_LEVEL = 0.45f; // of full scale - a pure tone near full level makes small speakers distort (sounds crunchy)
 
 static const int SIN_N = 256;
 static float sinTable[SIN_N];
@@ -76,9 +76,21 @@ static inline void advancePhase(float& ph, float hz) {
   if (ph >= TWO_PI_F) ph -= TWO_PI_F;
 }
 
+// Carrier pitch for pulsed tones: each session frequency maps to its own
+// note between G3 (196 Hz) and G4 (392 Hz) on a log scale, so different
+// sessions sound different, and the pitch stays above the range where
+// small speakers rattle.
+static float carrierFor(float f) {
+  if (f < 0.5f) f = 0.5f;
+  if (f > 100.0f) f = 100.0f;
+  float t = logf(f / 0.5f) / logf(200.0f); // 0.5 Hz -> 0, 100 Hz -> 1
+  return 196.0f * powf(2.0f, t);
+}
+
 static void renderTone(StereoFrame* out, int n) {
   float f = g_toneHz;
   if (f <= 0) f = 10.0f;
+  const float CARRIER_HZ = carrierFor(f);
   bool binaural = (f <= BINAURAL_MAX_HZ) && g_headphones && g_output == AUDIO_OUT_BLUETOOTH;
   const float amp = 32767.0f * TONE_LEVEL;
   for (int i = 0; i < n; i++) {
@@ -263,7 +275,7 @@ static void serviceSoundscapeFile() {
 // (Off <-> Tone <-> Soundscape) so there are no clicks.
 // ---------------------------------------------------------------------------
 static AudioSource renderingSource = AUDIO_SRC_OFF;
-static const float SCAPE_GAIN = 1.8f;
+static const float SCAPE_GAIN = 1.0f; // no boost - boosting clipped the loud parts (rain hits, thunder) into static
 // Keeps boosted audio from wrapping around (which sounds like loud crackles).
 static inline int16_t clip16(float v) {
   if (v > 32767.0f) return 32767;
@@ -347,9 +359,17 @@ static void speakerPump() {
   }
 
   // Built-in DAC takes the top 8 bits, unsigned. Mix L+R to mono for the
-  // single speaker, then offset to unsigned mid-scale.
+  // single speaker, then offset to unsigned mid-scale. Dropping to 8 bits by
+  // plain truncation sounds grainy/crunchy on quiet passages, so each sample
+  // is rounded and gets a tiny random "dither" first - the standard fix.
+  static uint32_t lcg = 0x1234567u;
   for (int i = 0; i < 256; i++) {
     int32_t m = ((int32_t)spkFrames[i].l + spkFrames[i].r) / 2;
+    lcg = lcg * 1664525u + 1013904223u; int32_t r1 = (int32_t)(lcg >> 24);
+    lcg = lcg * 1664525u + 1013904223u; int32_t r2 = (int32_t)(lcg >> 24);
+    m += (r1 - r2) + 128;                 // +/- one 8-bit step of dither, plus rounding
+    if (m > 32767) m = 32767;
+    if (m < -32768) m = -32768;
     uint16_t u = (uint16_t)(m + 32768);
     dacBuf[2 * i] = u;
     dacBuf[2 * i + 1] = u;
@@ -449,7 +469,7 @@ static bool onSsidMatchSaved(const char* ssid, esp_bd_addr_t address, int rssi) 
 static void btService() {
   if (!g_btStarted) return;
   if (!btVolumeSent && a2dp.is_connected()) {
-    a2dp.set_volume(120); // ~95% of the headset's range so it starts clearly audible; our volume curve does the rest
+    a2dp.set_volume(100); // ~80% of the speaker's range - higher drives small speakers into distortion
     btVolumeSent = true;
   }
   if (!a2dp.is_connected()) btVolumeSent = false;
