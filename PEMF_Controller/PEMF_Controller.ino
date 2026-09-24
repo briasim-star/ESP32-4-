@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.9.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.9.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -1798,7 +1798,7 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       snprintf(labelOut, labelLen, "Time zone: %s", wifitime_tzName(wifitime_tzIndex()));
       break;
     case SET_CHECKIN:
-      snprintf(labelOut, labelLen, checkInEnabled ? "Check-in: On" : "Check-in: Off");
+      snprintf(labelOut, labelLen, checkInEnabled ? "Ask how I feel: On" : "Ask how I feel: Off");
       *activeOut = checkInEnabled;
       break;
     case SET_FACTORY_RESET:
@@ -1894,11 +1894,24 @@ void handleSettingsItemTap(SettingsItemId id) {
       wifitime_setTz((wifitime_tzIndex() + 1) % wifitime_tzCount());
       screen = SCR_SETTINGS;
       break;
-    case SET_CHECKIN:
+    case SET_CHECKIN: {
       checkInEnabled = !checkInEnabled;
       saveSetupInfo();
+      // Say what it does, right where it was switched
+      drawAuroraBackground();
+      Rect c = {40, 90, 400, 140};
+      drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+      tft.setTextDatum(MC_DATUM); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+      tft.drawString(checkInEnabled ? "Ask how I feel: On" : "Ask how I feel: Off", 240, 118);
+      tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+      tft.drawString("When On, each session asks \"How do you feel?\"", 240, 156);
+      tft.drawString("(1-5) before and after. Saved in your Session Log.", 240, 180);
+      tft.setTextDatum(TL_DATUM);
+      delay(3500);
       screen = SCR_SETTINGS;
+      fullRedrawRequested = true;
       break;
+    }
     case SET_FACTORY_RESET:
       if (factoryResetArmed) performFactoryReset();
       else { factoryResetArmed = true; factoryResetArmedAt = millis(); screen = SCR_SETTINGS; }

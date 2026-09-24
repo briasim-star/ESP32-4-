@@ -11,6 +11,7 @@
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
 #include <esp_avrc_api.h>
+#include <esp_a2dp_api.h>
 #include <math.h>
 
 // ============================================================================
@@ -604,12 +605,29 @@ static void btService() {
   // 1.5 s - while the library is STILL in its "connecting" state, so the
   // connection is accepted by its state machine and audio starts normally.
   // (Calling connect_to() at other times breaks audio - see bt_audio notes.)
-  if (!btQuickConnectDone && millis() - btAttemptStartMs > 1500) {
-    btQuickConnectDone = true;
-    if (!a2dp.is_connected() && btSavedAddrValid) { // our own saved copy of the speaker's address
-      Serial.printf("[BT] quick retry at %lu ms\n", millis());
-      a2dp.connect_to(btSavedAddr);
+  // (1.9.4: the early "quick retry" connect_to() was removed. On 1.9.3 it
+  // produced connected-but-silent links - the stream never started - and
+  // the connection still completed at the library's own ~11 s anyway.)
+  btQuickConnectDone = true;
+
+  // Safety net: connected, a sound is on, but the speaker hasn't pulled a
+  // single audio frame for 5 s -> ask the Bluetooth stack to start the
+  // stream (once per stall). Logged over USB so it can be verified.
+  static uint32_t lastFrames = 0;
+  static unsigned long stuckSince = 0;
+  static bool kicked = false;
+  if (a2dp.is_connected() && g_output == AUDIO_OUT_BLUETOOTH && g_source != AUDIO_SRC_OFF) {
+    if (btFramesSent != lastFrames) { lastFrames = btFramesSent; stuckSince = 0; kicked = false; }
+    else if (!stuckSince) stuckSince = millis();
+    else if (!kicked && millis() - stuckSince > 5000) {
+      Serial.println("[BT] audio not flowing - asking the speaker to start the stream");
+      esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+      kicked = true;
     }
+  } else {
+    lastFrames = btFramesSent;
+    stuckSince = 0;
+    kicked = false;
   }
 }
 
