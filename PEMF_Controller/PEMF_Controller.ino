@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -3631,6 +3631,22 @@ int lastDrawnSoundscapesPage = -1;
 int lastDrawnSettingsPage = -1;
 bool lastDrawnShowDeviceStats = false;
 
+// Shown the moment the person submits their WiFi password on their phone,
+// so the few seconds of connecting never look like a frozen screen.
+void showWifiConnecting() {
+  drawAuroraBackground();
+  Rect c = {60, 100, 360, 110};
+  drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG);
+  tft.setTextColor(MADD_TEXT);
+  tft.drawString("Connecting to your WiFi...", 240, 138);
+  tft.setFreeFont(FONT_SM);
+  tft.setTextColor(MADD_DIM);
+  tft.drawString("This takes up to 15 seconds.", 240, 175);
+  tft.setTextDatum(TL_DATUM);
+}
+
 // Power-on animation: the MADD hex badge grows in, its color bands fill one
 // by one, then the name appears. About 1.5 s, and Bluetooth is already
 // connecting in the background while it plays.
@@ -3693,6 +3709,7 @@ void setup() {
   if (!updatePending) applyAudioOutput();
 
   playStartupAnimation(); // Bluetooth keeps connecting in the background meanwhile
+  wifitime_onConnecting(showWifiConnecting);
 
   // SD card: splash + soundscape list. Missing card = plain screens, no sounds.
   bool sdOk = sdmedia_begin();

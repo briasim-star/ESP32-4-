@@ -26,7 +26,8 @@ bool wifitime_isConfigured();
 void wifitime_beginSetupPortal();    // starts the portal, returns immediately
 bool wifitime_processPortal();       // call every loop() iteration while active; returns true once finished
 bool wifitime_isPortalActive();
-void wifitime_cancelPortal();        // call if the person backs out before finishing
+void wifitime_cancelPortal();
+void wifitime_onConnecting(void (*cb)()); // called just before connecting to the chosen network (show a message)        // call if the person backs out before finishing
 
 void wifitime_forgetNetwork();       // clears saved credentials, same tap-twice-confirm pattern as elsewhere
 bool wifitime_hasRealTime();         // true once NTP sync has succeeded this session

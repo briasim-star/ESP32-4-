@@ -82,12 +82,27 @@ void wifitime_begin() {
 // moment, after which the actual connect attempt (typically a few
 // seconds, not minutes) has to finish on its own either way.
 // ---------------------------------------------------------------------
+static void (*connectingCallback)() = nullptr;
+void wifitime_onConnecting(void (*cb)()) { connectingCallback = cb; }
+
+// Fired by WiFiManager right after the person submits their network and
+// password, just before the (blocking) connection attempt - so the screen
+// can say "Connecting..." instead of looking frozen.
+static void onPreSave() {
+  if (connectingCallback) connectingCallback();
+}
+
 void wifitime_beginSetupPortal() {
   if (wm == nullptr) wm = new WiFiManager();
   wm->setConfigPortalBlocking(false);
   wm->setConfigPortalTimeout(180);
+  wm->setConnectTimeout(12);          // a wrong password fails in ~12 s instead of hanging
+  wm->setPreSaveConfigCallback(onPreSave);
   portalActive = true;
-  wm->autoConnect(SETUP_AP_NAME, SETUP_AP_PASSWORD);
+  // startConfigPortal (not autoConnect): open the setup hotspot right away.
+  // autoConnect first retried the OLD saved network and made the screen
+  // stall before the hotspot even appeared.
+  wm->startConfigPortal(SETUP_AP_NAME, SETUP_AP_PASSWORD);
 }
 
 // Call every loop() iteration while wifitime_isPortalActive() is true.
@@ -101,7 +116,7 @@ bool wifitime_processPortal() {
     portalActive = false;
     if (WiFi.status() == WL_CONNECTED) {
       setMarkedConfigured(true);
-      g_timeSynced = doNtpSync(5000);
+      g_timeSynced = doNtpSync(3000); // quicker clock sync after setup
     }
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
