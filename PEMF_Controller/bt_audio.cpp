@@ -13,7 +13,7 @@
 //
 // Data flow:
 //   audioTask (own FreeRTOS task, core 1, above loop() priority)
-//     - opens/parses the chosen soundscape WAV and keeps a RAM ring buffer
+//     - opens/parses the chosen soundscape WAV and keeps a RAM sndRing buffer
 //       topped up from the SD card
 //     - when OUTPUT = speaker: renders audio and pushes it to the I2S DMA
 //       (i2s_write blocks until there is room, so it is naturally paced)
@@ -23,7 +23,7 @@
 //   so both outputs always sound the same.
 // ============================================================================
 
-static const uint32_t SAMPLE_RATE = 44100;
+static const uint32_t AUD_SAMPLE_RATE = 44100;
 static const i2s_port_t SPK_I2S_PORT = I2S_NUM_0; // built-in DAC only works on I2S0
 static const float TWO_PI_F = 6.28318530718f;
 
@@ -69,8 +69,8 @@ static inline float fastSin(float phase) {
 
 static float phL = 0, phR = 0, phEnv = 0;
 
-static inline void advance(float& ph, float hz) {
-  ph += TWO_PI_F * hz / SAMPLE_RATE;
+static inline void advancePhase(float& ph, float hz) {
+  ph += TWO_PI_F * hz / AUD_SAMPLE_RATE;
   if (ph >= TWO_PI_F) ph -= TWO_PI_F;
 }
 
@@ -84,16 +84,16 @@ static void renderTone(StereoFrame* out, int n) {
     if (binaural) {
       l = fastSin(phL);
       r = fastSin(phR);
-      advance(phL, CARRIER_HZ);
-      advance(phR, CARRIER_HZ + f);
+      advancePhase(phL, CARRIER_HZ);
+      advancePhase(phR, CARRIER_HZ + f);
     } else if (f < AUDIBLE_HZ) {
       float env = 0.5f + 0.5f * fastSin(phEnv);
       l = r = fastSin(phL) * env;
-      advance(phL, CARRIER_HZ);
-      advance(phEnv, f);
+      advancePhase(phL, CARRIER_HZ);
+      advancePhase(phEnv, f);
     } else {
       l = r = fastSin(phL);
-      advance(phL, f > DIRECT_MAX_HZ ? DIRECT_MAX_HZ : f);
+      advancePhase(phL, f > DIRECT_MAX_HZ ? DIRECT_MAX_HZ : f);
     }
     out[i].l = (int16_t)(l * amp);
     out[i].r = (int16_t)(r * amp);
@@ -101,12 +101,12 @@ static void renderTone(StereoFrame* out, int n) {
 }
 
 // ---------------------------------------------------------------------------
-// Soundscape ring buffer (stereo frames). Producer = audioTask only.
+// Soundscape sndRing buffer (stereo frames). Producer = audioTask only.
 // Consumer = whichever output is active. Index updates are guarded by a
 // spinlock; a generation counter makes a file switch safe mid-read.
 // ---------------------------------------------------------------------------
 static const int RING_FRAMES = 6144; // ~140 ms
-static StereoFrame ring[RING_FRAMES];
+static StereoFrame sndRing[RING_FRAMES];
 static int ringWritePos = 0, ringReadPos = 0, ringFilled = 0;
 static uint32_t ringGen = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
@@ -120,8 +120,8 @@ static int ringPull(StereoFrame* out, int n) {
   int take = n < filled ? n : filled;
   int first = RING_FRAMES - rp;
   if (first > take) first = take;
-  memcpy(out, ring + rp, first * sizeof(StereoFrame));
-  if (take > first) memcpy(out + first, ring, (take - first) * sizeof(StereoFrame));
+  memcpy(out, sndRing + rp, first * sizeof(StereoFrame));
+  if (take > first) memcpy(out + first, sndRing, (take - first) * sizeof(StereoFrame));
 
   portENTER_CRITICAL(&ringMux);
   if (gen == ringGen) {
@@ -225,7 +225,7 @@ static void refillRing() {
     sndRemaining -= got * bpf;
 
     const int16_t* s = (const int16_t*)readBuf;
-    StereoFrame* d = ring + wp;
+    StereoFrame* d = sndRing + wp;
     if (sndChannels == 2) {
       memcpy(d, s, got * sizeof(StereoFrame));
     } else {
@@ -262,7 +262,7 @@ static void serviceSoundscapeFile() {
 // ---------------------------------------------------------------------------
 static AudioSource renderingSource = AUDIO_SRC_OFF;
 static float fadeGain = 0.0f;
-static const float FADE_STEP = 1.0f / (SAMPLE_RATE * 0.04f); // ~40 ms
+static const float FADE_STEP = 1.0f / (AUD_SAMPLE_RATE * 0.04f); // ~40 ms
 
 static void renderFrames(StereoFrame* out, int n) {
   AudioSource want = g_source;
@@ -296,7 +296,7 @@ static void speakerInit() {
   i2s_config_t cfg;
   memset(&cfg, 0, sizeof(cfg));
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
-  cfg.sample_rate = SAMPLE_RATE;
+  cfg.sample_rate = AUD_SAMPLE_RATE;
   cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
   cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB; // correct format for the built-in DAC
@@ -362,7 +362,7 @@ static void speakerQuiet() {
 // ---------------------------------------------------------------------------
 static BluetoothA2DPSource a2dp;
 static char btName[64] = "";
-static bool btStarted = false;
+static bool g_btStarted = false;
 static bool btVolumeSent = false;
 
 static int32_t btDataCallback(Frame* data, int32_t len) {
@@ -375,11 +375,11 @@ static int32_t btDataCallback(Frame* data, int32_t len) {
 }
 
 static void btService() {
-  if (btStarted && !btVolumeSent && a2dp.is_connected()) {
+  if (g_btStarted && !btVolumeSent && a2dp.is_connected()) {
     a2dp.set_volume(100); // ~80% of the device's range; our own volume does the rest
     btVolumeSent = true;
   }
-  if (btStarted && !a2dp.is_connected()) btVolumeSent = false;
+  if (g_btStarted && !a2dp.is_connected()) btVolumeSent = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,27 +447,27 @@ void audio_setBtDeviceName(const char* name) {
 const char* audio_btDeviceName() { return btName; }
 
 void audio_btConnect() {
-  if (btStarted || btName[0] == 0) return;
+  if (g_btStarted || btName[0] == 0) return;
   a2dp.set_data_callback_in_frames(btDataCallback);
   a2dp.set_auto_reconnect(true);
   a2dp.start(btName); // returns quickly; the connection completes in the background
-  btStarted = true;
+  g_btStarted = true;
   btVolumeSent = false;
 }
-bool audio_btStarted() { return btStarted; }
-bool audio_btIsConnected() { return btStarted && a2dp.is_connected(); }
+bool audio_btStarted() { return g_btStarted; }
+bool audio_btIsConnected() { return g_btStarted && a2dp.is_connected(); }
 
 void audio_btEnd() {
-  if (btStarted) {
+  if (g_btStarted) {
     a2dp.end();
-    btStarted = false;
+    g_btStarted = false;
   }
 }
 
 // ---- scan ----
 static char scanResults[BT_SCAN_MAX_RESULTS][32];
 static volatile int scanCount = 0;
-static volatile bool scanning = false;
+static volatile bool g_scanning = false;
 
 static bool onSsidFound(const char* ssid, esp_bd_addr_t address, int rssi) {
   if (!ssid || !ssid[0] || scanCount >= BT_SCAN_MAX_RESULTS) return false;
@@ -479,7 +479,7 @@ static bool onSsidFound(const char* ssid, esp_bd_addr_t address, int rssi) {
 }
 
 static void onDiscoveryModeChanged(esp_bt_gap_discovery_state_t mode) {
-  scanning = (mode == ESP_BT_GAP_DISCOVERY_STARTED);
+  g_scanning = (mode == ESP_BT_GAP_DISCOVERY_STARTED);
 }
 
 void audio_btStartScan() {
@@ -488,10 +488,10 @@ void audio_btStartScan() {
   a2dp.set_discovery_mode_callback(onDiscoveryModeChanged);
   a2dp.set_data_callback_in_frames(btDataCallback);
   a2dp.start(); // no name -> open discovery
-  btStarted = true;
+  g_btStarted = true;
 }
-void audio_btStopScan() { if (btStarted) a2dp.cancel_discovery(); }
-bool audio_btIsScanning() { return scanning; }
+void audio_btStopScan() { if (g_btStarted) a2dp.cancel_discovery(); }
+bool audio_btIsScanning() { return g_scanning; }
 int audio_btScanResultCount() { return scanCount; }
 const char* audio_btScanResultName(int idx) {
   if (idx < 0 || idx >= scanCount) return "";
