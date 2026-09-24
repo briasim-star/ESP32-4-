@@ -53,7 +53,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "1.8.8"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "1.8.9"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 static const char* UPDATE_URL = "https://briasim-star.github.io/ESP32-4-/install.html";
 
 TFT_eSPI tft = TFT_eSPI();
@@ -1773,6 +1773,16 @@ void handleSettingsItemTap(SettingsItemId id) {
         // Bluetooth is holding - free it first. If Bluetooth was running,
         // the device restarts when setup finishes so Bluetooth comes back.
         audio_setSource(AUDIO_SRC_OFF);
+        { // shutting Bluetooth down and starting the hotspot takes several seconds - say so right away
+          drawAuroraBackground();
+          Rect c = {60, 100, 360, 110};
+          drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+          tft.setTextDatum(MC_DATUM); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+          tft.drawString("Starting WiFi setup...", 240, 138);
+          tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+          tft.drawString(audio_btStarted() ? "Pausing Bluetooth - about 10 seconds." : "About 5 seconds.", 240, 175);
+          tft.setTextDatum(TL_DATUM);
+        }
         if (audio_btStarted()) { audio_btEnd(true); restartAfterWifiSetup = true; }
         wifitime_beginSetupPortal();
         screen = SCR_WIFI_SETUP;
@@ -1887,6 +1897,10 @@ void drawWifiSetupScreen() {
   tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
   tft.drawString("Password: maddpemf2026", 240, 160);
   tft.drawString("Then pick your WiFi network on your phone.", 240, 182);
+  if (restartAfterWifiSetup) { // Bluetooth was paused to make room for WiFi setup
+    tft.setTextColor(MADD_CYAN, COLOR_BG);
+    tft.drawString("Bluetooth is paused and reconnects when you're done.", 240, 212);
+  }
   tft.setTextDatum(TL_DATUM);
   drawButton(btnWifiCancel, "Cancel", COLOR_MUTED);
 }
@@ -4189,7 +4203,7 @@ void loop() {
   if (audio_getSource() != AUDIO_SRC_OFF && millis() - lastAudioReport > 2000) {
     static uint32_t lastFrames = 0; static unsigned long lastUnder = 0;
     uint32_t fr = audio_btFramesSent(); unsigned long un = audio_underruns();
-    Serial.printf("[AUDIO] out=%s src=%d coil=%s frames/s=%lu gaps=%lu heap=%u\n", audioUsingBluetooth() ? "BT" : "SPK", (int)audio_getSource(), waveform_isRunning() ? "on" : "off", (unsigned long)((fr - lastFrames) / 2), un - lastUnder, ESP.getFreeHeap());
+    Serial.printf("[AUDIO] out=%s engine=%s vol=%d src=%d coil=%s frames/s=%lu gaps=%lu heap=%u\n", audioUsingBluetooth() ? "BT" : "SPK", audio_getOutput() == AUDIO_OUT_SPEAKER ? "SPK" : "BT", volumePercent, (int)audio_getSource(), waveform_isRunning() ? "on" : "off", (unsigned long)((fr - lastFrames) / 2), un - lastUnder, ESP.getFreeHeap());
     lastFrames = fr; lastUnder = un; lastAudioReport = millis();
   }
 
