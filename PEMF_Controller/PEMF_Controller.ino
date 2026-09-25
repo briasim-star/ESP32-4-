@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "2.0.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -680,8 +680,8 @@ void updateBattery() {
   batteryMv = batteryMv ? (batteryMv * 3 + mv) / 4 : mv;
   batteryPct = batteryPercentFor(batteryMv);
   if (!trendAt) { trendAt = millis(); trendMv = batteryMv; }
-  else if (millis() - trendAt > 120000UL) { // compare with 2 minutes ago
-    if (batteryMv > trendMv + 15) batteryCharging = true;
+  else if (millis() - trendAt > 60000UL) { // compare with a minute ago
+    if (batteryMv > trendMv + 10) batteryCharging = true;
     else if (batteryMv < trendMv - 10) batteryCharging = false;
     trendAt = millis(); trendMv = batteryMv;
   }
@@ -2184,7 +2184,7 @@ void handleSettingsItemTap(SettingsItemId id) {
       saveSetupInfo();
       showInfoCard(ledEnabled ? "Back Light: On" : "Back Light: Off",
                    "The light on the back glows with your session",
-                   "and stays dark during Sleep Night.");
+                   "on USB power (off on battery and in Sleep Night).");
       screen = SCR_SETTINGS;
       fullRedrawRequested = true;
       break;
@@ -4589,14 +4589,15 @@ void serviceBackLight() {
   static unsigned long last = 0;
   if (millis() - last < 30) return;
   last = millis();
-  if (!ledEnabled || sleepNightOn || sleepDarkAfter || sleepSetupOn) { ledSet(0, 0, 0); return; }
-  int maxLvl = (batteryPct >= 0 && !batteryCharging) ? 115 : 220; // brighter for the smoked/black clear case
-  if (screenDimmed) maxLvl /= 2;
+  // Only on USB power (the buck-converter boxes, or plugged in): no battery at
+  // all, or a battery the charger is holding up / filling. On battery alone
+  // the light stays off.
+  bool usbPower = batteryPct < 0 || batteryCharging || batteryMv >= 4150;
+  if (!ledEnabled || !usbPower || sleepNightOn || sleepDarkAfter || sleepSetupOn) { ledSet(0, 0, 0); return; }
+  int maxLvl = 255; // full brightness for the smoked/black clear case (USB power only)
+
   unsigned long now = millis();
-  if (batteryPct >= 0 && batteryPct <= 15 && !batteryCharging) {
-    if (now % 4000UL < 150) ledColor565(COLOR_WARN, maxLvl); else ledSet(0, 0, 0);
-    return;
-  }
+
   if (waveform_isRunning() && !sessionPaused) {
     uint16_t c = selectedIndex >= 0 ? categoryColor(BASE_PRESETS[selectedIndex].category) : MADD_CYAN;
     float hz = liveFrequency(), k;
