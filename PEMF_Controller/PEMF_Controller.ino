@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "2.0.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.3"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -4590,8 +4590,8 @@ void serviceBackLight() {
   if (millis() - last < 30) return;
   last = millis();
   if (!ledEnabled || sleepNightOn || sleepDarkAfter || sleepSetupOn) { ledSet(0, 0, 0); return; }
-  int maxLvl = (batteryPct >= 0 && !batteryCharging) ? 40 : 90;
-  if (screenDimmed) maxLvl /= 3;
+  int maxLvl = (batteryPct >= 0 && !batteryCharging) ? 115 : 220; // brighter for the smoked/black clear case
+  if (screenDimmed) maxLvl /= 2;
   unsigned long now = millis();
   if (batteryPct >= 0 && batteryPct <= 15 && !batteryCharging) {
     if (now % 4000UL < 150) ledColor565(COLOR_WARN, maxLvl); else ledSet(0, 0, 0);
@@ -4617,7 +4617,7 @@ void serviceBackLight() {
   int i0 = (int)t % 6, i1 = (i0 + 1) % 6;
   uint16_t c = blend565(MADD_SPECTRUM[i0], MADD_SPECTRUM[i1], (int)((t - (int)t) * 100), 100);
   float breath = 0.35f + 0.65f * (0.5f - 0.5f * cosf(now * 0.0009f));
-  ledColor565(c, (int)(maxLvl * 0.6f * breath));
+  ledColor565(c, (int)(maxLvl * 0.9f * breath));
 }
 
 void loop() {
