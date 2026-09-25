@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "2.0.1"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.2"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -271,7 +271,7 @@ void flushPendingCsv();          // writes the SD history line (defined with the
 LogEntry sessionLog[LOG_SIZE];
 int logCount = 0; // how many of the 5 slots are actually filled
 unsigned long lifetimeSessionCount = 0; // every session ever completed, not just the last 5
-unsigned long lifetimeMinutes = 0;      // total minutes of therapy ever delivered
+unsigned long lifetimeMinutes = 0;      // total session minutes ever
 
 void loadSessionLog() {
   Preferences p;
@@ -405,7 +405,7 @@ void btStatusText(char* buf, size_t len) {
     case BT_STATUS_CONNECTED:    snprintf(buf, len, "Connected: %s", btDeviceName); break;
     case BT_STATUS_RECONNECTING: snprintf(buf, len, "Reconnecting to %s...", btDeviceName); break;
     case BT_STATUS_NOT_FOUND:    snprintf(buf, len, "%s not found - tap to retry", btDeviceName); break;
-    default:                     snprintf(buf, len, audioUsingBluetooth() ? "Bluetooth starting..." : "Sound: onboard speaker"); break;
+    default:                     snprintf(buf, len, audioUsingBluetooth() ? "Bluetooth starting..." : "Sound: device speaker"); break;
   }
 }
 
@@ -421,7 +421,7 @@ uint16_t btStatusColor() {
 void drawBtStatusLine(int x, int y, int w) {
   tft.fillRect(x - 2, y - 2, w + 4, 18, COLOR_BG);
   if (!audioUsingBluetooth()) {
-    drawFittedText(x, y, w, "Sound plays on the onboard speaker", FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
+    drawFittedText(x, y, w, "Sound plays on the device speaker", FONT_SM, COLOR_TEXT_DIM, COLOR_BG);
     return;
   }
   char buf[48];
@@ -454,15 +454,15 @@ static const char* SOLF_NAMES[NUM_SOLFEGGIO] = {"solfeggio_174_hz", "solfeggio_2
 static const char* SOLF_PATHS[NUM_SOLFEGGIO] = {"tone:174", "tone:285", "tone:396", "tone:417", "tone:528", "tone:639", "tone:741", "tone:852", "tone:963"};
 // What each tone is traditionally associated with - shown when it's picked.
 static const char* SOLF_INFO[NUM_SOLFEGGIO] = {
-  "174 Hz: the tradition's foundation tone.",
-  "285 Hz: traditionally linked with renewal.",
-  "396 Hz: traditionally linked with letting go.",
-  "417 Hz: traditionally linked with change.",
-  "528 Hz: called the \"love frequency\".",
-  "639 Hz: traditionally linked with connection.",
-  "741 Hz: traditionally linked with expression.",
-  "852 Hz: traditionally linked with intuition.",
-  "963 Hz: the \"God frequency\" - oneness."};
+  "174 Hz - the foundation tone",
+  "285 Hz - linked with renewal",
+  "396 Hz - linked with letting go",
+  "417 Hz - linked with change",
+  "528 Hz - the \"love frequency\"",
+  "639 Hz - linked with connection",
+  "741 Hz - linked with expression",
+  "852 Hz - linked with intuition",
+  "963 Hz - the \"God frequency\""};
 
 int scapeCount() { return sdmedia_soundscapeCount() + NUM_NOISES + NUM_SOLFEGGIO; }
 const char* scapeName(int i) {
@@ -727,6 +727,32 @@ void backlightToGpio(bool on) {
   digitalWrite(TFT_BL, on ? HIGH : LOW);
 }
 
+// ---- Back light: the board's RGB LED, seen through a clear back ---------
+// Common anode (LOW = on), so levels are inverted. LEDC channels 5-7 at the
+// backlight's 5 kHz / 8-bit settings (channels 4+5 share a timer).
+static const int LED_CH_R = 5, LED_CH_G = 6, LED_CH_B = 7;
+bool ledEnabled = true;       // Settings -> Back light
+bool ledReady = false;
+bool screenDimmed = false;    // set by loop()'s idle dimming
+void ledSet(uint8_t r, uint8_t g, uint8_t b) {
+  if (!ledReady) return;
+  ledcWrite(LED_CH_R, 255 - r);
+  ledcWrite(LED_CH_G, 255 - g);
+  ledcWrite(LED_CH_B, 255 - b);
+}
+void ledBegin() {
+  ledcSetup(LED_CH_R, 5000, 8); ledcAttachPin(LED_R, LED_CH_R);
+  ledcSetup(LED_CH_G, 5000, 8); ledcAttachPin(LED_G, LED_CH_G);
+  ledcSetup(LED_CH_B, 5000, 8); ledcAttachPin(LED_B, LED_CH_B);
+  ledReady = true;
+  ledSet(0, 0, 0);
+}
+// One of our 16-bit screen colors, scaled to 0..level per channel.
+void ledColor565(uint16_t c, int level) {
+  int r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
+  ledSet(r * level / 255, g * level / 255, b * level / 255);
+}
+
 // "Thu 9:41 PM" / "9:41 PM" - false when the clock isn't known yet.
 bool clockText(char* buf, size_t len, bool withDay) {
   if (!wifitime_hasRealTime()) return false;
@@ -774,7 +800,7 @@ void drawTopStatus(bool force) {
   if (!force && strcmp(key, lastTopStatus) == 0) return;
   strcpy(lastTopStatus, key);
   fillAurora(300, 6, 164, 30);
-  const char* label = "Speaker";
+  const char* label = "Device";
   uint16_t dot = MADD_CYAN;
   if (audioUsingBluetooth()) {
     label = strlen(btDeviceName) > 0 ? btDeviceName : "Bluetooth";
@@ -809,7 +835,7 @@ void drawTopBar(const char* title, bool showBack, bool showHome = false) {
   tft.setFreeFont(FONT_LG);
   const GFXfont* f = (tft.textWidth(t) <= 240) ? FONT_LG : FONT_SM;
   drawFittedText(56, f == FONT_LG ? 8 : 12, 240, t, f, MADD_TEXT, MADD_PANEL);
-  if (showHome) drawChamferButton(Rect{358, 10, 106, 38}, "Home", MADD_PANEL, MADD_EDGE, MADD_TEXT); // same spot as btnHome (declared further down)
+  if (showHome) drawChamferButton(Rect{372, 3, 92, 32}, "Home", MADD_PANEL, MADD_EDGE, MADD_TEXT); // same spot as btnHome (declared further down)
   else drawTopStatus(true);
   drawSpectrumStripe(38);
 }
@@ -822,6 +848,7 @@ void loadSetupInfo() {
   Preferences p;
   p.begin("setup", true);
   checkInEnabled = p.getBool("checkin", true);
+  ledEnabled = p.getBool("led", true);
   setupDone = p.getBool("done", false);
   isWellnessCenter = p.getBool("wellness", false);
   requireLoginPassword = p.getBool("reqLogin", false);
@@ -867,6 +894,7 @@ void saveSetupInfo() {
   p.putUChar("sndMode", (uint8_t)sessionSoundMode);
   p.putInt("vol2", volumePercent);
   p.putBool("checkin", checkInEnabled);
+  p.putBool("led", ledEnabled);
   p.end();
 
   Preferences rp;
@@ -936,7 +964,7 @@ void drawButtonFast(Rect r, const char* label, uint16_t fillColor = 0xFFFF, bool
   drawChamferButton(r, label, fill, edge, MADD_TEXT, FONT_SM);
 }
 
-Rect btnHome = {358, 10, 106, 38}; // inset from the bezel
+Rect btnHome = {372, 3, 92, 32};  // fits above the color stripe at y=38 // inset from the bezel
 
 // Small, consistently-placed Home button, top-right corner of every
 // non-home screen. Always returns to the Category screen.
@@ -945,7 +973,9 @@ Rect btnHome = {358, 10, 106, 38}; // inset from the bezel
 // there's no button background/fill to match.
 void drawFittedText(int x, int y, int maxW, const char* text, const GFXfont* font, uint16_t color, uint16_t bg) {
   tft.setFreeFont(font);
-  tft.setTextColor(color, bg);
+  // On the aurora background (COLOR_BG) draw the text alone - with a
+  // background color the font code paints a dark box behind every word.
+  if (bg == COLOR_BG) tft.setTextColor(color); else tft.setTextColor(color, bg);
   tft.setTextDatum(TL_DATUM);
   if (tft.textWidth(text) <= maxW) {
     tft.drawString(text, x, y);
@@ -1015,7 +1045,7 @@ Rect stepperPlusRect(const Stepper& s)  { return {s.x + 158, s.y, 46, 40}; }
 
 void drawStepper(const Stepper& s) {
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(s.label, s.x, s.y - 22);
 
@@ -1025,7 +1055,7 @@ void drawStepper(const Stepper& s) {
   Rect vr = stepperValueRect(s);
   tft.fillRect(vr.x, vr.y, vr.w, vr.h, COLOR_BG);
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(MC_DATUM);
 
   char buf[16];
@@ -1086,15 +1116,15 @@ void drawWelcomeScreen() {
   tft.fillRect(0, 0, 480, 178, COLOR_BG);
 
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("MADD PEMF", 20, 10);
 
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_WARN, COLOR_BG);
+  tft.setTextColor(COLOR_WARN);
   tft.drawString("Wellness device - not a medical device", 20, 38);
 
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   const char* lines[] = {
     "Not intended to diagnose, treat, cure,",
     "or prevent any disease.",
@@ -1135,7 +1165,7 @@ void refreshWelcomeCheckbox() {
     tft.fillRect(checkboxRect.x + 4, checkboxRect.y + 4, checkSquareSize - 8, checkSquareSize - 8, COLOR_BG); // clear a previously-checked mark
   }
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("I understand and agree", checkboxRect.x + checkSquareSize + 10, checkboxRect.y + 4);
 
@@ -1172,9 +1202,9 @@ Rect personPickerRects[MAX_PEOPLE];
 void drawPersonPickerScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Who's using this?", 20, 20);
+  drawTopBar("Who's using this?", false, true); // Home = continue without choosing
 
   int colW = 220, rowH = 90, gapX = 20, gapY = 20, startY = 80;
   for (int i = 0; i < MAX_PEOPLE; i++) {
@@ -1190,6 +1220,7 @@ void drawPersonPickerScreen() {
 }
 
 void handlePersonPickerTouch(int x, int y) {
+  if (handleHomeTouch(x, y)) return;
   for (int i = 0; i < MAX_PEOPLE; i++) {
     if (strlen(peopleNames[i]) == 0 || !touchInRect(x, y, personPickerRects[i])) continue;
 
@@ -1203,7 +1234,7 @@ void handlePersonPickerTouch(int x, int y) {
     snprintf(greeting, sizeof(greeting), "Hi, %s!", shown);
     tft.fillScreen(COLOR_BG);
     tft.setFreeFont(FONT_XL);
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextColor(TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
     tft.drawString(greeting, 240, 160);
     delay(1200);
@@ -1243,13 +1274,13 @@ void removePerson(int idx) {
 void drawManagePeopleScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("< Manage People", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.drawString("Tap a name twice to remove them.", 20, 46);
 
   if (personToRemove >= 0 && millis() - personRemoveArmedAt > 5000) {
@@ -1316,11 +1347,11 @@ Rect btnWellnessCenter = {260, 100, 200, 100};
 void drawSetupModeScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Quick Setup", 20, 12);
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.drawString("How will this device be used?", 20, 44);
   tft.drawString("(This only shows once.)", 20, 64);
 
@@ -1347,12 +1378,12 @@ void handleSetupModeTouch(int x, int y) {
 // Shown once during first setup and from Settings -> Time zone. Needs no
 // WiFi; the clock itself appears once WiFi is set up.
 // ---------------------------------------------------------------------
-Rect btnTzDone = {170, 260, 140, 44};
+Rect btnTzDone = {170, 254, 140, 40};
 Rect tzRect(int i) { Rect r = {18 + (i % 3) * 150, 52 + (i / 3) * 50, 144, 44}; return r; }
 
 void drawTimezoneScreen() {
   drawAuroraBackground();
-  drawTopBar("Your time zone", !tzFromSetup, false);
+  drawTopBar("Your Time Zone", !tzFromSetup, false);
   int n = wifitime_tzCount();
   if (n > 12) n = 12;
   for (int i = 0; i < n; i++) {
@@ -1384,11 +1415,11 @@ Rect btnLoginNo  = {260, 100, 200, 100};
 void drawSetupLoginChoiceScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("One More Thing", 20, 12);
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.drawString("Require a staff PIN each time this", 20, 44);
   tft.drawString("device is turned on?", 20, 64);
 
@@ -1445,7 +1476,7 @@ const char* KB_ROW4 = "0123456789";
 Rect kbKeyRects[40];
 int kbKeyCount = 0;
 char kbKeyChars[40];
-Rect btnKbSpace, btnKbBackspace, btnKbOk;
+Rect btnKbSpace, btnKbBackspace, btnKbOk, btnKbCancel;
 
 void layoutKeyboard() {
   kbKeyCount = 0;
@@ -1464,7 +1495,8 @@ void layoutKeyboard() {
   }
 
   y += 4;
-  btnKbSpace     = {18, y, 252, 38};
+  btnKbCancel    = {18, y, 120, 38};
+  btnKbSpace     = {144, y, 126, 38};
   btnKbBackspace = {276, y, 90, 38};
   btnKbOk        = {372, y, 90, 38};
 }
@@ -1483,7 +1515,7 @@ void formatDisplayName(const char* raw, char* out, size_t outSize) {
 void drawTextEntryScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(textEntryPrompt, 20, 8);
 
@@ -1498,13 +1530,14 @@ void drawTextEntryScreen() {
     char label[2] = { kbKeyChars[i], 0 };
     drawButtonFast(kbKeyRects[i], label);
   }
+  drawButtonFast(btnKbCancel, "Cancel", COLOR_MUTED);
   drawButtonFast(btnKbSpace, "Space", COLOR_MUTED);
   drawButtonFast(btnKbBackspace, "<-", COLOR_MUTED);
   drawButton(btnKbOk, "OK", COLOR_GOOD);
 }
 
 void handleTextEntryTouch(int x, int y) {
-  layoutKeyboard(); // rects are cheap to recompute; keeps this self-contained
+  layoutKeyboard(); // rects are quick to recompute; keeps this self-contained
   for (int i = 0; i < kbKeyCount; i++) {
     if (touchInRect(x, y, kbKeyRects[i]) && textEntryLen < 22) {
       textEntryBuf[textEntryLen++] = kbKeyChars[i];
@@ -1522,6 +1555,10 @@ void handleTextEntryTouch(int x, int y) {
   if (touchInRect(x, y, btnKbBackspace)) {
     if (textEntryLen > 0) textEntryBuf[--textEntryLen] = 0;
     screen = SCR_TEXT_ENTRY;
+    return;
+  }
+  if (touchInRect(x, y, btnKbCancel)) { // leave without saving
+    screen = textEntryFinishesSetup ? SCR_SETUP_MODE : textEntryReturnScreen;
     return;
   }
   if (touchInRect(x, y, btnKbOk)) {
@@ -1549,17 +1586,19 @@ void handleTextEntryTouch(int x, int y) {
 // ---------------------------------------------------------------------
 bool clientConfirmChecked = false;
 Rect clientCheckboxRect = {20, 190, 40, 40};
+Rect clientCheckTapArea = {20, 186, 300, 48}; // the box and its "Confirmed" label
+Rect btnClientBack = {270, 250, 190, 48};
 Rect btnClientContinue = {60, 250, 200, 48};
 
 void drawClientConfirmScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Client Safety Check", 20, 24);
 
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_WARN, COLOR_BG);
+  tft.setTextColor(COLOR_WARN);
   const char* lines[] = {
     "Confirm this client has no pacemaker,",
     "insulin pump, or other implanted",
@@ -1573,15 +1612,17 @@ void drawClientConfirmScreen() {
     tft.fillRect(clientCheckboxRect.x + 5, clientCheckboxRect.y + 5,
                  clientCheckboxRect.w - 10, clientCheckboxRect.h - 10, COLOR_ACCENT);
   }
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Confirmed", clientCheckboxRect.x + clientCheckboxRect.w + 12, clientCheckboxRect.y + 6);
 
   drawButton(btnClientContinue, "Continue", clientConfirmChecked ? COLOR_GOOD : COLOR_MUTED, clientConfirmChecked);
+  drawButton(btnClientBack, "Back", COLOR_MUTED);
 }
 
 void handleClientConfirmTouch(int x, int y) {
-  if (touchInRect(x, y, clientCheckboxRect)) {
+  if (touchInRect(x, y, btnClientBack)) { clientConfirmChecked = false; screen = runScreenOrigin; return; }
+  if (touchInRect(x, y, clientCheckTapArea)) {
     clientConfirmChecked = !clientConfirmChecked;
     screen = SCR_CLIENT_CONFIRM;
     return;
@@ -1621,15 +1662,15 @@ void startPinEntry(PinPurpose purpose) {
 void drawPinScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   const char* title = (pinPurpose == PIN_DEV_MODE) ? "Developer Mode PIN" :
-                      (pinPurpose == PIN_SET_LOGIN) ? "Set Login Password" :
-                                                       "Enter Login Password";
+                      (pinPurpose == PIN_SET_LOGIN) ? "Set Staff PIN" :
+                                                       "Enter Staff PIN";
   const GFXfont* titleFont = (tft.textWidth(title) <= 226) ? FONT_LG : FONT_SM;
   drawFittedText(20, 16, 226, title, titleFont, TFT_WHITE, COLOR_BG);
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   const char* subtitle = (pinPurpose == PIN_DEV_MODE) ? "Trained users only. Unlocks up to 80% power for 60 min. Coils can get hot: check the coil by hand often and stop if warm. Never use where skin can't feel heat." :
                          (pinPurpose == PIN_SET_LOGIN) ? "Choose a PIN staff will use to log in" :
                                                           "Staff PIN required to use this device";
@@ -1646,7 +1687,7 @@ void drawPinScreen() {
   }
   mask[pinLen] = 0;
   tft.setFreeFont(FONT_XL);
-  tft.setTextColor(pinWrongFlash ? COLOR_DANGER : TFT_WHITE, COLOR_BG);
+  tft.setTextColor(pinWrongFlash ? COLOR_DANGER : TFT_WHITE);
   tft.drawString(pinLen > 0 ? mask : "-", 20, afterText + 6 > 104 ? afterText + 6 : 104);
   pinWrongFlash = false;
 
@@ -1712,7 +1753,7 @@ void handlePinTouch(int x, int y) {
   }
   if (pinPurpose != PIN_CHECK_LOGIN && touchInRect(x, y, pinCancelBtn)) {
     pinLen = 0; pinBuf[0] = 0;
-    screen = SCR_SETTINGS;
+    screen = (pinPurpose == PIN_SET_LOGIN) ? SCR_SETUP_LOGIN_CHOICE : SCR_SETTINGS;
   }
 }
 
@@ -1739,7 +1780,7 @@ static const unsigned long FACTORY_RESET_ARM_WINDOW_MS = 5000;
 void performFactoryReset() {
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Factory reset...", 240, 150);
   tft.setTextDatum(TL_DATUM);
@@ -1784,11 +1825,11 @@ void powerOff() {
   backlightToGpio(true);
   tft.fillScreen(COLOR_BG);
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Turning off", 240, 140);
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   // Tap-to-wake uses the touch panel's "touched" line (IO36). It only works
   // if that line rests HIGH once the finger is lifted - check first, and
   // say plainly which way turns it back on.
@@ -1806,10 +1847,11 @@ void powerOff() {
   audio_btEnd();
 
   // Lock every output that could drive something in a safe OFF state.
+  ledcDetachPin(LED_R); ledcDetachPin(LED_G); ledcDetachPin(LED_B); ledReady = false; // back light off
   ledcDetachPin(PIN_MD10C_PWM);
   ledcDetachPin(PIN_MD10C_DIR);
   const gpio_num_t lowPins[]  = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL };
-  const gpio_num_t highPins[] = { (gpio_num_t)AUDIO_ENABLE }; // amp enable is active LOW
+  const gpio_num_t highPins[] = { (gpio_num_t)AUDIO_ENABLE, (gpio_num_t)LED_R, (gpio_num_t)LED_G, (gpio_num_t)LED_B }; // amp enable and the RGB light are active LOW
   for (gpio_num_t p : lowPins)  { pinMode(p, OUTPUT); digitalWrite(p, LOW);  gpio_hold_en(p); }
   for (gpio_num_t p : highPins) { pinMode(p, OUTPUT); digitalWrite(p, HIGH); gpio_hold_en(p); }
   gpio_deep_sleep_hold_en();
@@ -1822,6 +1864,28 @@ void powerOff() {
   esp_deep_sleep_start();
 }
 
+// A short explanation card after a setting is switched. Tap to close (or
+// it closes by itself after 5 s).
+void showInfoCard(const char* title, const char* line1, const char* line2) {
+  drawAuroraBackground();
+  Rect c = {30, 90, 420, 140};
+  drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
+  tft.setTextDatum(MC_DATUM);
+  tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
+  tft.drawString(title, 240, 118);
+  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
+  tft.drawString(line1, 240, 156);
+  tft.drawString(line2, 240, 180);
+  tft.setTextColor(MADD_CYAN);
+  tft.drawString("Tap to close", 240, 212);
+  tft.setTextDatum(TL_DATUM);
+  uint16_t x, y;
+  while (tft.getTouch(&x, &y)) delay(20);
+  unsigned long t0 = millis();
+  while (millis() - t0 < 5000) { if (tft.getTouch(&x, &y)) break; delay(20); }
+  while (tft.getTouch(&x, &y)) delay(20);
+}
+
 // "Turn off?" - explains what happens and how to turn it back on, then
 // asks. Returns true if the person chose Turn off. (Settings -> Turn Off)
 bool confirmTurnOff() {
@@ -1832,9 +1896,9 @@ bool confirmTurnOff() {
   tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
   tft.drawString("Turn off?", 240, 72);
   tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
-  tft.drawString("Any session and sound stop, and the screen goes dark.", 240, 112);
+  tft.drawString("Sessions and sound stop; the screen goes dark.", 240, 112);
   tft.drawString("To turn it back on, tap the screen.", 240, 140);
-  tft.drawString("(If a tap doesn't wake it, press the BOOT button.)", 240, 164);
+  tft.drawString("If a tap doesn't wake it, press BOOT.", 240, 164);
   tft.drawString("Unplug it too if it won't be used for a while.", 240, 196);
   tft.setTextDatum(TL_DATUM);
   Rect yes = {50, 244, 180, 50}, no = {250, 244, 180, 50};
@@ -1920,6 +1984,7 @@ int buildVisibleSettingsItems(SettingsItemId* out) {
   out[n++] = SET_WIFI;
   out[n++] = SET_TIMEZONE;
   out[n++] = SET_CHECKIN;
+  out[n++] = SET_BACKLIGHT;
   out[n++] = SET_VIEW_LOG;
   out[n++] = SET_SOUNDSCAPES; // built-in noises are always there, even without an SD card
   out[n++] = SET_RECAL_TOUCH;
@@ -1934,14 +1999,14 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
     case SET_DEV_MODE:
       if (devModeUnlocked) {
         unsigned long remainMin = DEV_MODE_TIMEOUT_MIN - ((millis() - devModeStartMillis) / 60000UL);
-        snprintf(labelOut, labelLen, "Dev Mode: ON (%lum left)", remainMin);
+        snprintf(labelOut, labelLen, "Dev Mode On - %lu min", remainMin);
         *colorOut = COLOR_GOOD; *activeOut = true;
       } else {
         snprintf(labelOut, labelLen, "Unlock Dev Mode");
       }
       break;
     case SET_AUDIO_OUT:
-      snprintf(labelOut, labelLen, audioUsingBluetooth() ? "Sound: Bluetooth" : "Sound: Device speaker");
+      snprintf(labelOut, labelLen, audioUsingBluetooth() ? "Sound: Bluetooth" : "Sound: Device Speaker");
       *activeOut = true;
       break;
     case SET_CHECK_UPDATES:
@@ -1984,23 +2049,27 @@ void getSettingsItemDisplay(SettingsItemId id, char* labelOut, size_t labelLen, 
       }
       break;
     case SET_VIEW_LOG:
-      snprintf(labelOut, labelLen, "Session Log");
+      snprintf(labelOut, labelLen, "History");
       break;
     case SET_SOUNDSCAPES:
-      snprintf(labelOut, labelLen, "Soundscapes");
+      snprintf(labelOut, labelLen, "Sounds");
       break;
     case SET_RECAL_TOUCH:
       snprintf(labelOut, labelLen, "Recalibrate Touch");
       break;
     case SET_TIMEZONE:
-      snprintf(labelOut, labelLen, "Time zone: %s", wifitime_tzName(wifitime_tzIndex()));
+      snprintf(labelOut, labelLen, "Time Zone: %s", wifitime_tzName(wifitime_tzIndex()));
       break;
     case SET_TURN_OFF:
       snprintf(labelOut, labelLen, "Turn Off");
       break;
     case SET_CHECKIN:
-      snprintf(labelOut, labelLen, checkInEnabled ? "Ask how I feel: On" : "Ask how I feel: Off");
+      snprintf(labelOut, labelLen, checkInEnabled ? "Ask How I Feel: On" : "Ask How I Feel: Off");
       *activeOut = checkInEnabled;
+      break;
+    case SET_BACKLIGHT:
+      snprintf(labelOut, labelLen, ledEnabled ? "Back Light: On" : "Back Light: Off");
+      *activeOut = ledEnabled;
       break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed && millis() - factoryResetArmedAt > FACTORY_RESET_ARM_WINDOW_MS) factoryResetArmed = false;
@@ -2101,24 +2170,24 @@ void handleSettingsItemTap(SettingsItemId id) {
       tzFromSetup = false;
       screen = SCR_TIMEZONE;
       break;
-    case SET_CHECKIN: {
+    case SET_CHECKIN:
       checkInEnabled = !checkInEnabled;
       saveSetupInfo();
-      // Say what it does, right where it was switched
-      drawAuroraBackground();
-      Rect c = {40, 90, 400, 140};
-      drawChamfer(c, MADD_PANEL, MADD_CYAN, 12);
-      tft.setTextDatum(MC_DATUM); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
-      tft.drawString(checkInEnabled ? "Ask how I feel: On" : "Ask how I feel: Off", 240, 118);
-      tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
-      tft.drawString("When On, each session asks \"How do you feel?\"", 240, 156);
-      tft.drawString("(1-5) before and after. Saved in your Session Log.", 240, 180);
-      tft.setTextDatum(TL_DATUM);
-      delay(3500);
+      showInfoCard(checkInEnabled ? "Ask How I Feel: On" : "Ask How I Feel: Off",
+                   "Each session asks \"How do you feel?\" (1-5)",
+                   "before and after. Saved in your History.");
       screen = SCR_SETTINGS;
       fullRedrawRequested = true;
       break;
-    }
+    case SET_BACKLIGHT:
+      ledEnabled = !ledEnabled;
+      saveSetupInfo();
+      showInfoCard(ledEnabled ? "Back Light: On" : "Back Light: Off",
+                   "The light on the back glows with your session",
+                   "and stays dark during Sleep Night.");
+      screen = SCR_SETTINGS;
+      fullRedrawRequested = true;
+      break;
     case SET_FACTORY_RESET:
       if (factoryResetArmed) performFactoryReset();
       else { factoryResetArmed = true; factoryResetArmedAt = millis(); screen = SCR_SETTINGS; }
@@ -2208,17 +2277,17 @@ Rect btnWifiCancel = {150, 240, 180, 46};
 void drawWifiSetupScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Connect your phone to:", 240, 90);
   tft.setFreeFont(FONT_XL);
   tft.drawString("MADD-PEMF-Setup", 240, 125);
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.drawString("Password: maddpemf2026", 240, 160);
   tft.drawString("Then pick your WiFi network on your phone.", 240, 182);
   if (restartAfterWifiSetup) { // Bluetooth was paused to make room for WiFi setup
-    tft.setTextColor(MADD_CYAN, COLOR_BG);
+    tft.setTextColor(MADD_CYAN);
     tft.drawString("Bluetooth is paused and reconnects when you're done.", 240, 212);
   }
   tft.setTextDatum(TL_DATUM);
@@ -2241,49 +2310,42 @@ void handleWifiSetupTouch(int x, int y) {
 // Screen: session log (last 5 sessions)
 // ---------------------------------------------------------------------
 void drawLogScreen() {
-  drawAuroraBackground(); // MADD look (stage 2)
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("< Session Log", 20, 12);
-  drawHomeButton();
+  drawAuroraBackground();
+  drawTopBar("History", true, true);
 
-  tft.setFreeFont(FONT_SM);
+  char sum[48]; // all-time totals
+  snprintf(sum, sizeof(sum), "%lu sessions, %lu h %lu min in all", lifetimeSessionCount, lifetimeMinutes / 60, lifetimeMinutes % 60);
+  drawFittedText(20, 46, 440, sum, FONT_SM, MADD_CYAN, COLOR_BG);
   if (logCount == 0) {
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.drawString("No sessions recorded yet.", 20, 50);
+    drawFittedText(20, 76, 440, "No sessions recorded yet.", FONT_SM, MADD_DIM, COLOR_BG);
     return;
   }
 
-  // 2-column grid (up to 5 entries) instead of a single tall stack.
+  // Last 5 sessions, 2 columns (the full history is on the SD card: madd_sessions.csv)
   for (int i = 0; i < logCount; i++) {
     int col = i % 2, row = i / 2;
-    int x = 20 + col * 240, y = 40 + row * 90;
-    drawFittedText(x, y, 220, sessionLog[i].name, FONT_SM, TFT_WHITE, COLOR_BG); // constrained - a long preset name could otherwise run into the next column
+    int x = 20 + col * 230, y = 72 + row * 76;
     char buf[48];
-    snprintf(buf, sizeof(buf), "%.0f Hz - %d min", sessionLog[i].freqHz, sessionLog[i].durationMin);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-    tft.drawString(buf, x, y + 22);
+    drawFittedText(x, y, 215, sessionLog[i].name, FONT_SM, MADD_TEXT, COLOR_BG);
+    snprintf(buf, sizeof(buf), "%g Hz - %d min", sessionLog[i].freqHz, sessionLog[i].durationMin);
+    drawFittedText(x, y + 18, 215, buf, FONT_SM, MADD_DIM, COLOR_BG);
     if (sessionLog[i].timestamp > 0) {
       struct tm* t = localtime(&sessionLog[i].timestamp);
-      char dateBuf[24];
-      strftime(dateBuf, sizeof(dateBuf), "%b %d, %Y %H:%M", t);
-      tft.drawString(dateBuf, x, y + 42);
+      strftime(buf, sizeof(buf), "%b %d, %I:%M %p", t); // 12-hour, like the clock
+      drawFittedText(x, y + 36, 215, buf, FONT_SM, MADD_DIM, COLOR_BG);
     }
     if (sessionLog[i].feelBefore || sessionLog[i].feelAfter) { // check-in scores, "-" = skipped
-      char feel[24];
       char b = sessionLog[i].feelBefore ? (char)('0' + sessionLog[i].feelBefore) : '-';
       char a = sessionLog[i].feelAfter ? (char)('0' + sessionLog[i].feelAfter) : '-';
-      snprintf(feel, sizeof(feel), "Felt %c then %c", b, a);
-      tft.setTextColor(MADD_CYAN, COLOR_BG);
-      tft.drawString(feel, x, y + 62);
+      snprintf(buf, sizeof(buf), "Felt: before %c, after %c", b, a);
+      drawFittedText(x, y + 54, 215, buf, FONT_SM, MADD_CYAN, COLOR_BG);
     }
   }
 }
 
 void handleLogTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
-  if (y < 40 && x < 300) screen = logOrigin; // "< Session Log" = back to wherever it was opened from
+  if (y < 40 && x < 300) screen = logOrigin; // "< History" = back to wherever it was opened from
 }
 
 // ---------------------------------------------------------------------
@@ -2302,7 +2364,7 @@ bool scanRequested = false; // true the instant the button is tapped, before the
 void drawBtScanScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("< Bluetooth Device", 20, 12);
   drawHomeButton();
@@ -2335,7 +2397,7 @@ void drawBtScanScreen() {
 
   int count = audio_btScanResultCount();
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   tft.setTextDatum(TL_DATUM);
   if (count == 0) {
     tft.drawString((scanning || scanRequested) ? "Looking for nearby devices..." : "No devices found yet - tap Scan.", 20, gridStartY + 4);
@@ -2414,13 +2476,13 @@ void handleBtScanTouch(int x, int y) {
       audio_btForget();
       tft.fillScreen(COLOR_BG);
       tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextColor(TFT_WHITE);
       tft.setTextDatum(MC_DATUM);
       char msg[48];
       snprintf(msg, sizeof(msg), "Connecting to %s", btDeviceName);
       tft.drawString(msg, 240, 140);
       tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.setTextColor(COLOR_TEXT_DIM);
       tft.drawString("Restarting once to connect - about 10 seconds.", 240, 175);
       tft.setTextDatum(TL_DATUM);
       delay(1500);
@@ -2457,13 +2519,13 @@ Rect btnCfStart  = {20, 166, 180, 44};
 void drawCustomFreqScreen() {
   drawAuroraBackground(); // MADD look (stage 2)
   tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Custom Frequency", 20, 14);
   drawHomeButton();
 
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  tft.setTextColor(COLOR_TEXT_DIM);
   char rangeBuf[32];
   snprintf(rangeBuf, sizeof(rangeBuf), "Enter 1-%d Hz (decimals OK)", CUSTOM_FREQ_MAX);
   tft.drawString(rangeBuf, 20, 44);
@@ -2476,7 +2538,7 @@ void drawCustomFreqScreen() {
   char shown[20];
   snprintf(shown, sizeof(shown), "%s Hz", customFreqLen > 0 ? customFreqBuf : "-");
   tft.setFreeFont(FONT_XL);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
+  tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(shown, 20, 68);
 
@@ -2543,55 +2605,33 @@ void handleCustomFreqTouch(int x, int y) {
 // ---------------------------------------------------------------------
 // Screen: Check for Updates (over WiFi).
 // ---------------------------------------------------------------------
-Rect btnOtaAction = {20, 180, 220, 44};
-bool otaChecked = false;
-bool otaUpdateAvailable = false;
-bool otaChecking = false;
+Rect btnOtaAction = {20, 170, 260, 48};
 
 void drawUpdateScreen() {
-  drawAuroraBackground(); // MADD look (stage 2)
-  tft.setFreeFont(FONT_LG);
-  tft.setTextColor(TFT_WHITE, COLOR_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.drawString("< Check for Updates", 20, 14);
-  drawHomeButton();
-
-  tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+  drawAuroraBackground();
+  drawTopBar("Check for Updates", true, true);
   char verBuf[32];
   snprintf(verBuf, sizeof(verBuf), "Current version: %s", FIRMWARE_VERSION);
-  tft.drawString(verBuf, 20, 44);
-  tft.drawString("Updates download and install over WiFi.", 20, 66);
-  tft.drawString("Keep the device plugged in while it installs.", 20, 88);
-
-  if (!otaChecked) {
-    drawButton(btnOtaAction, "Check for Updates", COLOR_GOOD);
-  } else if (otaUpdateAvailable) {
-    char label[32];
-    snprintf(label, sizeof(label), "Install v%s Now", ota_latestVersionString());
-    drawButton(btnOtaAction, label, COLOR_WARN);
-  } else {
-    drawButton(btnOtaAction, "Up to date!", COLOR_MUTED, true);
-  }
+  drawFittedText(20, 56, 440, verBuf, FONT_SM, MADD_TEXT, COLOR_BG);
+  drawFittedText(20, 84, 440, "Updates download and install over WiFi.", FONT_SM, MADD_DIM, COLOR_BG);
+  drawFittedText(20, 106, 440, "Keep the device plugged in while it installs.", FONT_SM, MADD_DIM, COLOR_BG);
+  drawFittedText(20, 128, 440, "It restarts to check, then shows the result.", FONT_SM, MADD_DIM, COLOR_BG);
+  drawChamferButton(btnOtaAction, "Check for Updates", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
 }
 
 void handleUpdateTouch(int x, int y) {
-  if (y < 40 && x < 300) { otaChecked = false; screen = SCR_SETTINGS; return; } // "< Check for Updates" = back
-  if (handleHomeTouch(x, y)) {
-    otaChecked = false; // reset so re-entering this screen starts fresh
-    return;
-  }
-  if (otaChecking) return; // ignore taps while a blocking check/install is underway
+  if (y < 40 && x < 300) { screen = SCR_SETTINGS; return; } // "< Check for Updates" = back
+  if (handleHomeTouch(x, y)) return;
 
   if (touchInRect(x, y, btnOtaAction)) {
     if (!wifitime_isConfigured()) {
       tft.fillScreen(COLOR_BG);
       tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextColor(TFT_WHITE);
       tft.setTextDatum(MC_DATUM);
       tft.drawString("Set up WiFi first", 240, 140);
       tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.setTextColor(COLOR_TEXT_DIM);
       tft.drawString("Settings -> Set Up WiFi, then try again.", 240, 175);
       delay(2500);
       screen = SCR_UPDATE;
@@ -2608,11 +2648,11 @@ void handleUpdateTouch(int x, int y) {
     p.end();
     tft.fillScreen(COLOR_BG);
     tft.setFreeFont(FONT_LG);
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextColor(TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Restarting to check for updates", 240, 140);
     tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+    tft.setTextColor(COLOR_TEXT_DIM);
     tft.drawString("This takes about 30 seconds.", 240, 175);
     tft.setTextDatum(TL_DATUM);
     delay(1500);
@@ -2625,7 +2665,7 @@ void handleUpdateTouch(int x, int y) {
 // message never flashes by before it can be read.
 void waitForTapOrTimeout(unsigned long ms) {
   tft.setFreeFont(FONT_SM);
-  tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+  tft.setTextColor(COLOR_ACCENT);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Tap the screen to continue", 240, 230);
   tft.setTextDatum(TL_DATUM);
@@ -2652,11 +2692,11 @@ void runPendingUpdateCheck() {
   auto show = [](const char* big, const char* small) {
     tft.fillScreen(COLOR_BG);
     tft.setFreeFont(FONT_LG);
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextColor(TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
     tft.drawString(big, 240, 140);
     tft.setFreeFont(FONT_SM);
-    tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+    tft.setTextColor(COLOR_TEXT_DIM);
     tft.drawString(small, 240, 175);
     tft.setTextDatum(TL_DATUM);
   };
@@ -2726,7 +2766,7 @@ struct HomeTileDef { const char* label; HomeTile kind; Category cat; int colorId
 // colorIdx: 0 orange, 1 coral, 2 pink, 3 magenta, 4 violet, 5 blue, -1 cyan, -2 dim
 static const int NUM_HOME_TILES = 12; // 4 across x 3 rows
 static const HomeTileDef HOME_TILES[NUM_HOME_TILES] = {
-  {"Sleep",       TILE_CATEGORY,   CAT_HEART_CIRC,       5},
+  {"Relax",       TILE_CATEGORY,   CAT_HEART_CIRC,       5}, // "Relaxation & Sleep" sessions (Sleep Night is its own tile)
   {"Focus",       TILE_CATEGORY,   CAT_MENTAL_COGNITIVE, 4},
   {"Wellness",    TILE_CATEGORY,   CAT_CHRONIC_SYSTEMIC, 2},
   {"Athletic",    TILE_CATEGORY,   CAT_PAIN_RECOVERY,    0},
@@ -2740,6 +2780,17 @@ static const HomeTileDef HOME_TILES[NUM_HOME_TILES] = {
   {"Settings",    TILE_SETTINGS,   CAT_BONE_JOINT,      -2},
 };
 Rect homeTileRects[NUM_HOME_TILES];
+// Home top-left power button (the standard power symbol), drawn over the badge.
+Rect btnPower = {4, 2, 48, 36};
+void drawPowerButton() {
+  fillAurora(0, 0, 54, 38);
+  drawChamfer(btnPower, MADD_PANEL, MADD_MAGENTA, 6);
+  int cx = btnPower.x + btnPower.w / 2, cy = btnPower.y + btnPower.h / 2 + 1;
+  tft.drawCircle(cx, cy, 9, MADD_TEXT);
+  tft.drawCircle(cx, cy, 8, MADD_TEXT);
+  tft.fillRect(cx - 4, cy - 11, 9, 7, MADD_PANEL);  // the gap at the top of the ring
+  tft.fillRect(cx - 1, cy - 12, 3, 11, MADD_TEXT);  // the line through the gap
+}
 void openSleepSetup(); // defined with Sleep Night, near the end - the "Sleep Night" tile calls it
 
 uint16_t tileColor(int idx) {
@@ -2790,6 +2841,7 @@ void drawCoilIcon(int cx, int topY, bool bright) {
 void drawCategoryScreen() {
   drawAuroraBackground();
   drawTopBar("MADD PEMF", false);
+  drawPowerButton(); // top-left, over the badge: the visible way to turn the device off
   drawHomeClock();
 
   // Quick start card - greets by time of day when the clock is known
@@ -2838,6 +2890,11 @@ void drawCategoryScreen() {
 }
 
 void handleCategoryTouch(int x, int y) {
+  if (!resumeOffer && touchInRect(x, y, btnPower)) {
+    if (confirmTurnOff()) powerOff(); // powerOff() never returns
+    fullRedrawRequested = true;       // Cancel: back to Home
+    return;
+  }
   if (resumeOffer) {
     if (touchInRect(x, y, btnResumeYes)) {
       resumeOffer = false;
@@ -2896,19 +2953,24 @@ Rect btnSeqPrevPage = {18, 222, 140, 42};
 Rect btnSeqBack = {170, 222, 140, 42};
 Rect btnSeqNextPage = {322, 222, 140, 42};
 
-// Compact "X Hz -> Y Hz" preview using the sequence's first and last
-// step frequencies, so a person can see roughly what range it moves
-// through before picking it, rather than just a name.
+// The full range a Journey covers (lowest - highest step), e.g. "1-30 Hz",
+// with whole numbers where possible ("7.83" and "1.25" keep their decimals).
+static void fmtHz(float f, char* out, size_t len) {
+  if (f == (int)f) snprintf(out, len, "%d", (int)f);
+  else snprintf(out, len, "%g", f);
+}
 void getSequenceFreqRange(int idx, char* buf, size_t bufLen) {
   const Program& p = SEQUENCES[idx];
-  float first = p.steps[0].freqHz;
-  float last = p.steps[p.stepCount - 1].freqHz;
-  float diff = (first > last) ? (first - last) : (last - first); // avoid needing fabsf/math.h here
-  if (diff < 0.5f) {
-    snprintf(buf, bufLen, "%.2g Hz", first);
-  } else {
-    snprintf(buf, bufLen, "%.2g -> %.2g Hz", first, last);
+  float lo = p.steps[0].freqHz, hi = lo;
+  for (int i = 1; i < p.stepCount; i++) {
+    if (p.steps[i].freqHz < lo) lo = p.steps[i].freqHz;
+    if (p.steps[i].freqHz > hi) hi = p.steps[i].freqHz;
   }
+  char a[12], b[12];
+  fmtHz(lo, a, sizeof(a));
+  fmtHz(hi, b, sizeof(b));
+  if (hi - lo < 0.01f) snprintf(buf, bufLen, "%s Hz", a);
+  else snprintf(buf, bufLen, "%s-%s Hz", a, b);
 }
 
 void drawSequencesScreen() {
@@ -2996,7 +3058,7 @@ Rect btnSndNextPage = {322, 222, 140, 42};
 // ---------------------------------------------------------------------
 void drawSoundscapesScreen() {
   drawAuroraBackground();
-  drawTopBar(soundscapesOrigin == SCR_RUN ? "Pick a sound" : "Soundscapes", true, soundscapesOrigin != SCR_RUN);
+  drawTopBar(soundscapesOrigin == SCR_RUN ? "Pick a Sound" : "Sounds", true, soundscapesOrigin != SCR_RUN);
 
   int count = scapeCount();
   int highlighted = (soundscapesOrigin == SCR_RUN) ? sessionSoundscapeIndex : previewSoundscapeIndex;
@@ -3021,8 +3083,8 @@ void drawSoundscapesScreen() {
   drawPagerRow(btnSndPrevPage, btnSndBack, btnSndNextPage, soundscapesPage, (count + SOUNDSCAPES_PER_PAGE - 1) / SOUNDSCAPES_PER_PAGE);
   const char* info = highlighted >= 0 ? scapeInfo(highlighted) : nullptr;
   if (info) { // Solfeggio tone picked: what it is, honestly
-    drawFittedText(18, 270, 330, info, FONT_SM, MADD_CYAN, MADD_PANEL);
-    drawFittedText(18, 290, 444, "Solfeggio is a sound tradition - no health effect is claimed.", FONT_SM, MADD_DIM, MADD_PANEL);
+    drawFittedText(18, 268, 330, info, FONT_SM, MADD_CYAN, COLOR_BG);
+    drawFittedText(18, 286, 444, "A sound tradition. No health effect is claimed.", FONT_SM, MADD_DIM, COLOR_BG);
   } else if (soundscapesOrigin != SCR_RUN) {
     drawFittedText(18, 272, 330, "Tap to preview, tap again to stop.", FONT_SM, MADD_DIM, MADD_PANEL);
   }
@@ -3112,16 +3174,6 @@ uint16_t categoryColor(Category c) {
     if (HOME_TILES[i].kind == TILE_CATEGORY && HOME_TILES[i].cat == c) return tileColor(HOME_TILES[i].colorIdx);
   return MADD_MAGENTA;
 }
-// Sleep Night card: fills the empty third row of the Sleep list.
-Rect btnSleepNight = {18, 160, 444, 48};
-void openSleepSetup(); // defined with Sleep Night, further down
-// Shown on the last page of the Sleep list, in the free third row.
-bool showSleepNightCard(int total) {
-  if (viewingFavorites || currentCategory != CAT_HEART_CIRC) return false;
-  int lastPage = total > 0 ? (total - 1) / ITEMS_PER_PAGE : 0;
-  int onPage = total - listPage * ITEMS_PER_PAGE;
-  return listPage == lastPage && onPage <= 4;
-}
 
 // 2 x 3 grid of presets on the MADD background, each with its category color.
 void drawListScreen() {
@@ -3152,13 +3204,6 @@ void drawListScreen() {
       drawFittedText(r.x + 14, r.y + 27, r.w - 22, f, FONT_SM, MADD_CYAN, MADD_PANEL);
     }
   }
-  if (showSleepNightCard(total)) {
-    drawChamfer(btnSleepNight, MADD_PANEL, tileColor(5), 8);
-    tft.fillCircle(46, btnSleepNight.y + 24, 13, MADD_TEXT);       // crescent moon
-    tft.fillCircle(53, btnSleepNight.y + 19, 12, MADD_PANEL);
-    drawFittedText(76, btnSleepNight.y + 8, 370, "Sleep Night", FONT_SM, MADD_TEXT, MADD_PANEL);
-    drawFittedText(76, btnSleepNight.y + 27, 370, "Sound only, all night - the screen goes dark", FONT_SM, MADD_CYAN, MADD_PANEL);
-  }
   drawPagerRow(btnPrevPage, btnBackFromList, btnNextPage, listPage, (total + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE);
 }
 
@@ -3178,7 +3223,6 @@ void handleListTouch(int x, int y) {
   if (handleHomeTouch(x, y)) return;
   if (y < 36 && x < 300) { screen = SCR_CATEGORY; return; } // "< title" = back
   int total = listCount();
-  if (showSleepNightCard(total) && touchInRect(x, y, btnSleepNight)) { openSleepSetup(); return; }
   int start = listPage * ITEMS_PER_PAGE;
   for (int i = 0; i < ITEMS_PER_PAGE; i++) {
     int idx = start + i;
@@ -3204,22 +3248,22 @@ void handleListTouch(int x, int y) {
 // Left: coil rings + hexagon countdown, then Start/Pause, Stop, Favorite.
 Rect btnRunTitle      = {18, 0, 280, 36};     // "< Name" in the top bar = stop and go back
 Rect btnStartStop     = {18, 258, 96, 40};
-Rect btnBackFromRun   = {120, 258, 66, 40};   // Stop
-Rect btnFavToggle     = {192, 258, 32, 40};
+Rect btnBackFromRun   = {120, 258, 62, 40};   // Stop (or Back when idle)
+Rect btnFavToggle     = {186, 258, 38, 40};
 // Right panel: sound choice, power, volume, timer, status.
 Rect runPanel         = {230, 46, 234, 254};
 Rect btnSndOff        = {240, 70, 62, 34};
 Rect btnSndTone       = {308, 70, 68, 34};
 Rect btnSndScape      = {382, 70, 74, 34};
-Rect btnPickSound     = {240, 108, 216, 22};
+Rect btnPickSound     = {240, 106, 216, 28};
 Rect btnPwrMinus      = {240, 136, 48, 34};
 Rect btnPwrPlus       = {408, 136, 48, 34};
 Rect btnVolMinus      = {240, 190, 48, 34};
 Rect btnVolPlus       = {408, 190, 48, 34};
 Rect btnTmrMinus      = {240, 228, 48, 34};
 Rect btnTmrPlus       = {408, 228, 48, 34};
-Rect btnOutBt         = {240, 266, 132, 28};  // where the sound plays: [ X20 | Device ]
-Rect btnOutDev        = {376, 266, 80, 28};
+Rect btnOutBt         = {240, 265, 132, 31};  // where the sound plays: [ X20 | Device ]
+Rect btnOutDev        = {376, 265, 80, 31};
 static const int RUN_HEX_X = 112, RUN_HEX_Y = 142, RUN_HEX_R = 58;
 
 unsigned long sessionStartMillis = 0;
@@ -3593,6 +3637,10 @@ void drawRunHexContents(const char* timeText, const char* freqText) {
   tft.setFreeFont(FONT_SM);
   tft.setTextColor(MADD_CYAN);
   tft.drawString(freqText, RUN_HEX_X, RUN_HEX_Y + 18);
+  if (!programActive && (selWave == WAVE_SAW || selWave == WAVE_LAYERED)) { // pulse shape on its own line
+    tft.setTextColor(MADD_DIM);
+    tft.drawString(selWave == WAVE_SAW ? "Sawtooth" : "Layered", RUN_HEX_X, RUN_HEX_Y - 36);
+  }
   tft.setTextDatum(TL_DATUM);
 }
 
@@ -3638,9 +3686,7 @@ void drawCountdownOnly() {
 
   char freqBuf[32], f[16];
   formatFreq(liveFrequency(), f, sizeof(f));
-  if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%s  %d/%d", f, programStepIndex + 1, currentProgram.stepCount);
-  else if (selWave == WAVE_SAW) snprintf(freqBuf, sizeof(freqBuf), "Sawtooth %s", f);
-  else if (selWave == WAVE_LAYERED) snprintf(freqBuf, sizeof(freqBuf), "Layered %s", f);
+  if (programActive) snprintf(freqBuf, sizeof(freqBuf), "%.1f Hz  %d/%d", liveFrequency(), programStepIndex + 1, currentProgram.stepCount); // one decimal while gliding
   else snprintf(freqBuf, sizeof(freqBuf), "%s", f);
 
   if (strcmp(timeBuf, lastCountdownText) != 0 || strcmp(freqBuf, lastFreqText) != 0) {
@@ -3705,7 +3751,7 @@ void refreshRunControls() {
   else if (sessionPaused) drawChamferButton(btnStartStop, "Resume", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
   else if (running)       drawChamferButton(btnStartStop, "Pause", tft.color565(90, 54, 6), MADD_SPECTRUM[0], MADD_TEXT, FONT_LG);
   else                    drawChamferButton(btnStartStop, "Start", tft.color565(12, 58, 40), COLOR_GOOD, MADD_TEXT, FONT_LG);
-  drawChamferButton(btnBackFromRun, "Stop", tft.color565(58, 13, 26), MADD_SPECTRUM[2], MADD_TEXT);
+  drawChamferButton(btnBackFromRun, (running || sessionPaused) ? "Stop" : "Back", tft.color565(58, 13, 26), MADD_SPECTRUM[2], MADD_TEXT); // "Back" when nothing is running
   bool isFav = (selectedIndex >= 0) && favoriteBits[selectedIndex];
   if (selectedIndex >= 0) {
     drawChamferButton(btnFavToggle, "*", isFav ? tft.color565(90, 54, 6) : MADD_PANEL, isFav ? MADD_SPECTRUM[0] : MADD_EDGE, MADD_TEXT, FONT_LG);
@@ -3718,7 +3764,7 @@ void refreshRunControls() {
                     sessionSoundMode == AUDIO_SRC_OFF ? MADD_DIM : MADD_EDGE, MADD_TEXT);
   drawChamferButton(btnSndTone, "Tone", sessionSoundMode == AUDIO_SRC_TONE ? onFill : MADD_PANEL,
                     sessionSoundMode == AUDIO_SRC_TONE ? MADD_CYAN : MADD_EDGE, MADD_TEXT);
-  drawChamferButton(btnSndScape, "Nature", sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? onFill : MADD_PANEL,
+  drawChamferButton(btnSndScape, "Sounds", sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? onFill : MADD_PANEL,
                     sessionSoundMode == AUDIO_SRC_SOUNDSCAPE ? MADD_CYAN : MADD_EDGE, haveScapes ? MADD_TEXT : MADD_EDGE);
 
   char nowBuf[40];
@@ -3767,6 +3813,12 @@ void refreshRunControls() {
     drawFittedText(28, 216, 184, "Tap to close", FONT_SM, MADD_DIM, MADD_PANEL);
   }
   if (checkInStage) drawCheckInCard();
+  else if (pendingSequenceIndex >= 0 && !running && !sessionPaused && !startCountdownAt && !sessionCompleteShow) {
+    // Before a Journey starts: what it is, in its own honest words
+    drawChamfer(CHK_CARD, MADD_PANEL, MADD_CYAN, 12);
+    drawFittedText(26, 62, 190, "About this Journey", FONT_SM, MADD_CYAN, MADD_PANEL);
+    drawWrappedText(26, 86, 190, SEQUENCES[pendingSequenceIndex].note, FONT_SM, MADD_TEXT, MADD_PANEL, 16);
+  }
 }
 
 // Pulses the coil rings in step with the session (visible up to ~4 Hz).
@@ -3858,10 +3910,9 @@ void handleRunTouch(int x, int y) {
     timerMinutes += touchInRect(x, y, btnTmrPlus) ? 5 : -5;
     if (timerMinutes < 0) timerMinutes = 0;
     if (timerMinutes > 60) timerMinutes = 60;
-    if (waveform_isRunning()) {
-      sessionStartMillis = millis();
-      sessionTimerArmed = (timerMinutes > 0);
-    }
+    // Mid-session: keep the time already done - the session simply ends
+    // when its total reaches the new timer (the log keeps the real minutes).
+    if (waveform_isRunning() || sessionPaused) sessionTimerArmed = (timerMinutes > 0);
     return;
   }
   if (touchInRect(x, y, btnStartStop)) {
@@ -3882,7 +3933,7 @@ void handleRunTouch(int x, int y) {
       lastSessionLogged = false;
       pendingFeelBefore = 0;
       if (checkInEnabled) { checkInStage = 1; fullRedrawRequested = true; } // ask first, then 3-2-1
-      else startCountdownAt = millis();  // 3-2-1, then beginSessionNow() from loop()
+      else { startCountdownAt = millis(); fullRedrawRequested = true; } // 3-2-1 (clears the Journey note), then beginSessionNow()
     }
     return;
   }
@@ -3944,7 +3995,7 @@ void drawScreen(Screen s) {
 }
 
 // After a tap that kept us on the same screen: repaint only what can
-// change. Screens that are cheap (plain background) just redraw fully;
+// change. Screens that are quick to draw (plain background) just redraw fully;
 // the splash-background screens only touch their controls.
 void refreshScreen(Screen s) {
   switch (s) {
@@ -4138,7 +4189,24 @@ bool sleepDarkAfter = false;           // finished: stay dark until a tap
 unsigned long sleepStartMs = 0, sleepTotalMs = 0, sleepLitAt = 0, sleepLastSave = 0;
 bool sleepLit = false;
 int sleepScapeIdx = -1;
-const Rect sleepStopBtn = {160, 214, 160, 56};
+const Rect sleepStopBtn = {160, 238, 160, 50};
+const Rect sleepVolMinus = {60, 186, 70, 44}, sleepVolPlus = {350, 186, 70, 44}; // volume while the night plays
+void drawSleepVolume(Rect minus, Rect plus) {
+  char v[24];
+  snprintf(v, sizeof(v), "%s %d%%", audioUsingBluetooth() ? "BT volume" : "Volume", volumePercent);
+  drawValueRow(minus, plus, v);
+}
+// Volume +/- on the Sleep Night screens. Saved when the night ends - never mid-sound.
+bool sleepVolumeTap(int tx, int ty, Rect minus, Rect plus) {
+  if (!touchInRect(tx, ty, minus) && !touchInRect(tx, ty, plus)) return false;
+  volumePercent += touchInRect(tx, ty, plus) ? 5 : -5;
+  if (volumePercent < 0) volumePercent = 0;
+  if (volumePercent > 100) volumePercent = 100;
+  audio_setVolume((uint8_t)volumePercent);
+  settingsDirtyAt = millis();
+  drawSleepVolume(minus, plus);
+  return true;
+}
 
 void saveSleepNight(int minutesLeft) {
   Preferences p;
@@ -4156,21 +4224,23 @@ void drawSleepNightScreen() {
     tft.drawString(clk, 240, 32);
     tft.setTextDatum(TL_DATUM);
   }
-  Rect c = {60, 60, 360, 130};
+  Rect c = {60, 56, 360, 120};
   drawChamfer(c, MADD_PANEL, MADD_EDGE, 12);
   tft.setTextDatum(MC_DATUM);
   tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT);
-  tft.drawString("Sleep Night", 240, 92);
+  tft.drawString("Sleep Night", 240, 82);
   char buf[40], name[24];
   prettySoundName(sleepScapeIdx, name, sizeof(name));
   tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM);
-  tft.drawString(name, 240, 130);
+  tft.drawString(name, 240, 116);
   unsigned long el = millis() - sleepStartMs;
   int left = el >= sleepTotalMs ? 0 : (int)((sleepTotalMs - el) / 60000UL);
-  snprintf(buf, sizeof(buf), "Sound only - ends in %d min", left);
-  tft.drawString(buf, 240, 162);
+  if (left >= 60) snprintf(buf, sizeof(buf), "Sound only - ends in %d h %d min", left / 60, left % 60);
+  else snprintf(buf, sizeof(buf), "Sound only - ends in %d min", left);
+  tft.drawString(buf, 240, 146);
   tft.setTextDatum(TL_DATUM);
-  drawChamferButton(sleepStopBtn, "Stop", MADD_PANEL, MADD_MAGENTA, MADD_TEXT);
+  drawSleepVolume(sleepVolMinus, sleepVolPlus);
+  drawChamferButton(sleepStopBtn, "Stop", MADD_PANEL, MADD_MAGENTA, MADD_TEXT, FONT_LG);
 }
 
 void sleepLightScreen() {
@@ -4199,6 +4269,7 @@ void stopSleepNight(bool stayDark) {
   audio_setSource(AUDIO_SRC_OFF);
   audio_setNightShape(1.0f, 0.0f);
   saveSleepNight(0);
+  if (settingsDirtyAt) { settingsDirtyAt = 0; saveSetupInfo(); } // volume changed during the night - sound is off now, safe to save
   screen = SCR_CATEGORY;
   fullRedrawRequested = true;
   sleepDarkAfter = stayDark;
@@ -4240,9 +4311,10 @@ bool sleepSetupOn = false, sleepSetupDraw = false;
 int sleepSetupScape = -1, sleepSetupLen = 2;
 const int SLEEP_LENGTHS[4] = {120, 180, 300, 480};
 const char* SLEEP_LEN_LABELS[4] = {"2 h", "3 h", "5 h", "8 h"};
-const Rect slPrev = {40, 88, 70, 50}, slName = {120, 88, 240, 50}, slNext = {370, 88, 70, 50};
-const Rect slBack = {40, 236, 180, 56}, slStart = {260, 236, 180, 56};
-Rect slLenRect(int i) { Rect r = {40 + i * 108, 160, 96, 48}; return r; }
+const Rect slPrev = {40, 80, 70, 44}, slName = {120, 80, 240, 44}, slNext = {370, 80, 70, 44};
+const Rect slVolMinus = {40, 184, 70, 44}, slVolPlus = {370, 184, 70, 44};
+const Rect slBack = {40, 240, 180, 50}, slStart = {260, 240, 180, 50};
+Rect slLenRect(int i) { Rect r = {40 + i * 108, 132, 96, 44}; return r; }
 
 void drawSleepSetup() {
   drawAuroraBackground();
@@ -4261,16 +4333,14 @@ void drawSleepSetup() {
     bool on = (i == sleepSetupLen);
     drawChamferButton(slLenRect(i), SLEEP_LEN_LABELS[i], on ? tft.color565(40, 30, 64) : MADD_PANEL, on ? MADD_CYAN : MADD_EDGE, MADD_TEXT, FONT_LG);
   }
+  drawSleepVolume(slVolMinus, slVolPlus);
   drawChamferButton(slBack, "Back", MADD_PANEL, MADD_EDGE, MADD_TEXT, FONT_LG);
   drawChamferButton(slStart, "Start", MADD_PANEL, MADD_MAGENTA, MADD_TEXT, FONT_LG);
 }
 
-// Called from the Sleep list. Drawn on the next pass, after the list's own tap handling.
+// Called from the Home "Sleep Night" tile. Drawn on the next pass, after the
+// tap handling. (There's always a sound to pick: the built-in noises and tones.)
 void openSleepSetup() {
-  if (scapeCount() == 0) {
-    drawBootBanner("Add sound files to the SD card first", COLOR_WARN);
-    return;
-  }
   if (sleepSetupScape < 0 || sleepSetupScape >= scapeCount()) sleepSetupScape = defaultSoundscapeFor("sleep", 1.0f);
   sleepSetupOn = true;
   sleepSetupDraw = true;
@@ -4294,10 +4364,12 @@ void serviceSleepSetup(bool press, int tx, int ty) {
     redraw = true;
   }
   for (int i = 0; i < 4; i++) if (touchInRect(tx, ty, slLenRect(i))) { sleepSetupLen = i; redraw = true; }
+  if (sleepVolumeTap(tx, ty, slVolMinus, slVolPlus)) return;
   uint16_t x, y;
   if (touchInRect(tx, ty, slBack)) {
     sleepSetupOn = false;
     audio_setSource(AUDIO_SRC_OFF);
+    if (settingsDirtyAt) { settingsDirtyAt = 0; saveSetupInfo(); } // sound is off now - safe to save
     fullRedrawRequested = true;
     while (tft.getTouch(&x, &y)) delay(20);
     return;
@@ -4337,6 +4409,7 @@ bool serviceSleepNight(bool touched, int tx, int ty) {
   }
   if (press) {
     if (!sleepLit) sleepLightScreen();
+    else if (sleepVolumeTap(tx, ty, sleepVolMinus, sleepVolPlus)) sleepLitAt = millis(); // keep the screen lit while adjusting
     else if (touchInRect(tx, ty, sleepStopBtn)) {
       stopSleepNight(false);
       uint16_t x, y;
@@ -4374,12 +4447,13 @@ void setup() {
   Serial.printf("[BOOT] reset reason %d (3=restart 4=crash 5/6=watchdog)\n", (int)esp_reset_reason()); // USB only
   // Waking from "off": release the pins that were locked safe for sleep.
   gpio_deep_sleep_hold_dis();
-  const gpio_num_t heldPins[] = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL, (gpio_num_t)AUDIO_ENABLE };
+  const gpio_num_t heldPins[] = { (gpio_num_t)PIN_MD10C_PWM, (gpio_num_t)PIN_MD10C_DIR, (gpio_num_t)TFT_BL, (gpio_num_t)AUDIO_ENABLE, (gpio_num_t)LED_R, (gpio_num_t)LED_G, (gpio_num_t)LED_B };
   for (gpio_num_t p : heldPins) gpio_hold_dis(p);
   pinMode(BOOT_BTN, INPUT_PULLUP);
 
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
+  ledBegin(); // RGB back light, off until loop() starts its pattern
 
   tft.init();
   tft.setRotation(1); // landscape 480x320
@@ -4455,7 +4529,7 @@ void setup() {
   } else if (tft.getTouchRawZ() > 350) {
     tft.fillScreen(COLOR_BG);
     tft.setFreeFont(FONT_LG);
-    tft.setTextColor(TFT_WHITE, COLOR_BG);
+    tft.setTextColor(TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Release to recalibrate touch", 240, 150);
     tft.setTextDatum(TL_DATUM);
@@ -4467,11 +4541,11 @@ void setup() {
     if (!forceCal) {
       tft.fillScreen(COLOR_BG);
       tft.setFreeFont(FONT_LG);
-      tft.setTextColor(COLOR_WARN, COLOR_BG);
+      tft.setTextColor(COLOR_WARN);
       tft.setTextDatum(MC_DATUM);
       tft.drawString("Something is pressing the screen", 240, 140);
       tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.setTextColor(COLOR_TEXT_DIM);
       tft.drawString("Check that the bezel is not touching the display.", 240, 175);
       tft.setTextDatum(TL_DATUM);
       delay(4000);
@@ -4503,15 +4577,59 @@ void setup() {
   resumeSleepNightIfSaved();
 }
 
+// ---- Back light behavior (called every loop) --------------------------
+//   idle      slow aurora drift through the MADD colors, breathing
+//   session   the session's category color; pulses with the coil at 4 Hz
+//             and below, follows the breathing pacer in Relax sessions,
+//             steady glow with a soft shimmer above that
+//   Sleep Night / off / Back light Off   dark
+//   battery low   brief amber blink every 4 s
+// Eco brightness on battery; a third of that while the screen is dimmed.
+void serviceBackLight() {
+  static unsigned long last = 0;
+  if (millis() - last < 30) return;
+  last = millis();
+  if (!ledEnabled || sleepNightOn || sleepDarkAfter || sleepSetupOn) { ledSet(0, 0, 0); return; }
+  int maxLvl = (batteryPct >= 0 && !batteryCharging) ? 40 : 90;
+  if (screenDimmed) maxLvl /= 3;
+  unsigned long now = millis();
+  if (batteryPct >= 0 && batteryPct <= 15 && !batteryCharging) {
+    if (now % 4000UL < 150) ledColor565(COLOR_WARN, maxLvl); else ledSet(0, 0, 0);
+    return;
+  }
+  if (waveform_isRunning() && !sessionPaused) {
+    uint16_t c = selectedIndex >= 0 ? categoryColor(BASE_PRESETS[selectedIndex].category) : MADD_CYAN;
+    float hz = liveFrequency(), k;
+    if (nameHas(selCategoryName, "sleep") || nameHas(selCategoryName, "relax")) {
+      unsigned long ph = (now - sessionStartMillis) % 10000UL;       // breathe: 4 s in, 6 s out
+      k = ph < 4000 ? ph / 4000.0f : 1.0f - (ph - 4000) / 6000.0f;
+      k = 0.15f + 0.85f * k;
+    } else if (hz > 0 && hz <= 4.0f) {                               // pulse with the coil
+      float period = 1000.0f / hz;
+      k = fmodf((float)(now - sessionStartMillis), period) < period / 2 ? 1.0f : 0.15f;
+    } else {
+      k = 0.75f + 0.25f * sinf(now * 0.004f);                         // steady, soft shimmer
+    }
+    ledColor565(c, (int)(maxLvl * k));
+    return;
+  }
+  float t = (now % 24000UL) / 4000.0f;                                 // 0..6 across the six colors
+  int i0 = (int)t % 6, i1 = (i0 + 1) % 6;
+  uint16_t c = blend565(MADD_SPECTRUM[i0], MADD_SPECTRUM[i1], (int)((t - (int)t) * 100), 100);
+  float breath = 0.35f + 0.65f * (0.5f - 0.5f * cosf(now * 0.0009f));
+  ledColor565(c, (int)(maxLvl * 0.6f * breath));
+}
+
 void loop() {
   uint16_t tx = 0, ty = 0;
   bool touched = tft.getTouch(&tx, &ty);
   serviceBootButton();
+  serviceBackLight();
 
   // Idle dimming: 5 min without a touch -> the screen dims (it never turns
   // off). The tap that brightens it is not treated as a button press.
   static unsigned long lastTouchAt = 0;
-  static bool dimmed = false;
+  bool& dimmed = screenDimmed; // shared with the back light
   bool sleepOwnsScreen = sleepNightOn || sleepDarkAfter || sleepSetupOn; // Sleep Night runs its own backlight
   if (touched) lastTouchAt = millis();
   if (dimmed && (touched || sleepOwnsScreen)) {
@@ -4547,7 +4665,7 @@ void loop() {
     if (wifitime_processPortal()) {
       tft.fillScreen(COLOR_BG);
       tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextColor(TFT_WHITE);
       tft.setTextDatum(MC_DATUM);
       tft.drawString(wifitime_isConfigured() ? "WiFi connected!" : "Setup timed out - try again.", 240, 160);
       delay(1500);
@@ -4720,7 +4838,9 @@ void loop() {
     BtStatus st = audio_btStatus();
     bool edge = (audio_btStatusChanges() != lastBtChanges) ||
                 (st == BT_STATUS_NOT_FOUND && lastShownBt != BT_STATUS_NOT_FOUND);
-    if (edge && (st == BT_STATUS_CONNECTED || st == BT_STATUS_RECONNECTING || st == BT_STATUS_NOT_FOUND) && st != lastShownBt) {
+    // Not on the session screen: its [X20 | Device] row already shows this, and
+    // the pop-up would cover the Start/Stop buttons.
+    if (edge && screen != SCR_RUN && (st == BT_STATUS_CONNECTED || st == BT_STATUS_RECONNECTING || st == BT_STATUS_NOT_FOUND) && st != lastShownBt) {
       char msg[48];
       if (st == BT_STATUS_CONNECTED) snprintf(msg, sizeof(msg), "Bluetooth connected: %s", btDeviceName);
       else if (st == BT_STATUS_RECONNECTING) snprintf(msg, sizeof(msg), "Bluetooth dropped - reconnecting...");
@@ -4750,11 +4870,11 @@ void loop() {
     else if (millis() - btPickAt > 25000) {
       tft.fillScreen(COLOR_BG);
       tft.setFreeFont(FONT_LG);
-      tft.setTextColor(TFT_WHITE, COLOR_BG);
+      tft.setTextColor(TFT_WHITE);
       tft.setTextDatum(MC_DATUM);
       tft.drawString("Finishing Bluetooth setup", 240, 140);
       tft.setFreeFont(FONT_SM);
-      tft.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
+      tft.setTextColor(COLOR_TEXT_DIM);
       tft.drawString("Restarting once to connect - about 10 seconds.", 240, 175);
       tft.setTextDatum(TL_DATUM);
       delay(1500);
