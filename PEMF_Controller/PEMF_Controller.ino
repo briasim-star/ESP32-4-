@@ -51,7 +51,7 @@
 static const char* HW_TIER_NAME = "MADD PEMF - Entry (MD10C)";
 // static const char* HW_TIER_NAME = "MADD PEMF - Pro (MD30C)";
 
-const char* FIRMWARE_VERSION = "2.0.4"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
+const char* FIRMWARE_VERSION = "2.0.5"; // not static - ota_update.cpp reads this via extern. Bumped again from 1.1.0 for the local-audio write-failure fix - check this on Settings -> Check for Updates before reporting a symptom, so we know whether it's from this build or an earlier one.
 
 TFT_eSPI tft = TFT_eSPI();
 

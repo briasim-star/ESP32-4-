@@ -27,7 +27,9 @@ void sdmedia_unlock();
 bool sdmedia_showSplash();
 
 // Soundscapes - scans /sounds/ for .wav files at boot.
-static const int MAX_SOUNDSCAPES = 12;
+// Only the name is stored (32 bytes each); the path is rebuilt from it on
+// demand, so 30 entries use less RAM than the old 12 with stored paths.
+static const int MAX_SOUNDSCAPES = 30;
 int sdmedia_scanSoundscapes();      // returns how many were found
 int sdmedia_soundscapeCount();
 const char* sdmedia_soundscapeName(int idx); // display name

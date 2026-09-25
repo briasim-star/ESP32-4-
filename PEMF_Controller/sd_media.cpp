@@ -148,7 +148,6 @@ bool sdmedia_showSplash() {
 // Soundscape file scanning
 // ---------------------------------------------------------------------
 static char soundscapeNames[MAX_SOUNDSCAPES][32];
-static char soundscapePaths[MAX_SOUNDSCAPES][48];
 static int soundscapeCountVal = 0;
 
 // Diagnostic counters, exposed so the Welcome screen can show exactly
@@ -184,18 +183,15 @@ int sdmedia_scanSoundscapes() {
         String base = rawName;
         int slash = base.lastIndexOf('/');
         if (slash >= 0) base = base.substring(slash + 1);
-        String displayName = base;
-        displayName.replace(".wav", "");
-        displayName.replace(".WAV", "");
+        String displayName = base.substring(0, base.length() - 4); // strip ".wav" in any case
 
-        String fullPath = rawName;
-        if (!fullPath.startsWith("/")) fullPath = "/sounds/" + fullPath;
-
-        strncpy(soundscapeNames[soundscapeCountVal], displayName.c_str(), sizeof(soundscapeNames[0]) - 1);
-        soundscapeNames[soundscapeCountVal][sizeof(soundscapeNames[0]) - 1] = 0;
-        strncpy(soundscapePaths[soundscapeCountVal], fullPath.c_str(), sizeof(soundscapePaths[0]) - 1);
-        soundscapePaths[soundscapeCountVal][sizeof(soundscapePaths[0]) - 1] = 0;
-        soundscapeCountVal++;
+        // the path is rebuilt from the name, so a name that doesn't fit whole is skipped
+        if (displayName.length() > 0 && displayName.length() < sizeof(soundscapeNames[0])) {
+          strcpy(soundscapeNames[soundscapeCountVal], displayName.c_str());
+          soundscapeCountVal++;
+        } else {
+          Serial.printf("[SD] skipped %s - name longer than %d characters\n", base.c_str(), (int)sizeof(soundscapeNames[0]) - 1);
+        }
       }
     }
     entry = dir.openNextFile();
@@ -216,5 +212,7 @@ const char* sdmedia_soundscapeName(int idx) {
 
 const char* sdmedia_soundscapePath(int idx) {
   if (idx < 0 || idx >= soundscapeCountVal) return "";
-  return soundscapePaths[idx];
+  static char path[48]; // callers copy it right away (audio_setSoundscapeFile)
+  snprintf(path, sizeof(path), "/sounds/%s.wav", soundscapeNames[idx]);
+  return path;
 }
