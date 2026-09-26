@@ -1,4 +1,4 @@
-Post order (carousel): post_1.png -> post_2.png -> post_3.png (classified preview)
+Post order (carousel): post_1 (hook) -> post_2 (science) -> post_3 (5-device lineup) -> post_4 (classified preview)
 Reel: teaser_reel.mp4 (silent track - add trending audio in Instagram)
 
 Caption:

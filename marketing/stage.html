@@ -95,14 +95,136 @@ function teaseShot(img, t, alpha, box) {
   text('CLASSIFIED PREVIEW', bx + 30, by + 44, 26, CYAN, TX, 600, 'left', alpha);
 }
 
+
+/* ---------------- Device lineup ---------------- */
+const LINEUP = [
+  ['01', 'POCKET',          'Preset programs. Fits in your hand.', 'pocket'],
+  ['02', 'PORTABLE',        'Battery powered. Place it anywhere.', 'portable'],
+  ['03', 'DUAL-COIL',       'Two coils. Lithium power.',           'dual'],
+  ['04', 'HOME',            'The portable docks in. Full power.',   'home'],
+  ['05', 'WELLNESS CENTER', 'Clinic-grade. Dual output.',           'clinic'],
+];
+const LINE_T = 1.5, LINE_EACH = 1.35;
+const lineupLength = () => LINE_T + LINEUP.length * LINE_EACH;
+
+function rr(x, y, w, h, r, fill, stroke) {
+  X.beginPath(); X.roundRect(x, y, w, h, r);
+  if (fill) { X.fillStyle = fill; X.fill(); }
+  if (stroke) { X.strokeStyle = stroke; X.stroke(); }
+}
+
+// Hard-case silhouette: body, lid seam, latches, handle. Glowing cyan outline.
+function hardCase(cx, cy, w, h, latches) {
+  X.lineWidth = 4; X.shadowColor = CYAN; X.shadowBlur = 30;
+  rr(cx - w / 2, cy - h / 2, w, h, 26, '#0b1320', CYAN);
+  X.shadowBlur = 0;
+  X.strokeStyle = 'rgba(46,230,255,0.45)'; X.beginPath();
+  X.moveTo(cx - w / 2, cy - h * 0.12); X.lineTo(cx + w / 2, cy - h * 0.12); X.stroke();
+  for (let i = 0; i < latches; i++) {
+    const lx = cx - w / 2 + (w / (latches + 1)) * (i + 1);
+    rr(lx - 26, cy - h * 0.12 - 22, 52, 44, 8, '#13233a', CYAN);
+  }
+  rr(cx - w * 0.18, cy - h / 2 - 46, w * 0.36, 46, 20, null, CYAN);
+}
+
+function coil(x, y, r, t) {
+  X.lineWidth = 4; X.strokeStyle = CYAN; X.shadowColor = CYAN; X.shadowBlur = 24;
+  X.beginPath(); X.arc(x, y, r, 0, Math.PI * 2); X.stroke();
+  X.shadowBlur = 0;
+  for (let k = 1; k <= 3; k++) {
+    X.strokeStyle = `rgba(46,230,255,${0.5 * (1 - ((t * 1.2 + k / 3) % 1))})`;
+    X.beginPath(); X.arc(x, y, r + ((t * 1.2 + k / 3) % 1) * 90, 0, Math.PI * 2); X.stroke();
+  }
+}
+
+function cable(x1, y1, x2, y2) {
+  X.lineWidth = 5; X.strokeStyle = 'rgba(46,230,255,0.6)';
+  X.beginPath(); X.moveTo(x1, y1);
+  X.bezierCurveTo(x1, y1 + 160, x2, y2 - 160, x2, y2); X.stroke();
+}
+
+function screenDevice(cx, cy, w, h) {
+  X.lineWidth = 4; X.shadowColor = CYAN; X.shadowBlur = 30;
+  rr(cx - w / 2, cy - h / 2, w, h, 34, '#0b1320', CYAN); X.shadowBlur = 0;
+  rr(cx - w / 2 + 28, cy - h / 2 + 28, w - 56, h - 56, 14, '#06202a', 'rgba(46,230,255,0.5)');
+}
+
+function device(kind, cx, cy, t) {
+  X.save();
+  if (kind === 'pocket') hardCase(cx, cy, 300, 220, 1);
+  if (kind === 'portable') {
+    cable(cx - 60, cy + 120, cx - 200, cy + 380); cable(cx + 60, cy + 120, cx + 200, cy + 380);
+    screenDevice(cx, cy, 380, 250);
+    rr(cx - 230, cy + 370, 60, 36, 10, '#13233a', CYAN); rr(cx + 170, cy + 370, 60, 36, 10, '#13233a', CYAN);
+  }
+  if (kind === 'dual') {
+    cable(cx - 50, cy - 20, cx - 200, cy + 300); cable(cx + 50, cy - 20, cx + 200, cy + 300);
+    screenDevice(cx, cy - 120, 340, 230);
+    coil(cx - 200, cy + 330, 85, t); coil(cx + 200, cy + 330, 85, t);
+  }
+  if (kind === 'home') {
+    hardCase(cx, cy + 40, 560, 360, 2);
+    // docked module rising into the lid
+    const up = 60 * (1 - ease(t / 0.8));
+    screenDevice(cx, cy - 10 - up, 300, 190);
+  }
+  if (kind === 'clinic') {
+    hardCase(cx, cy + 40, 720, 460, 3);
+    for (const dx of [-120, 120]) { X.lineWidth = 4; rr(cx + dx - 45, cy + 150, 90, 90, 45, '#13233a', CYAN); }
+    X.fillStyle = RED; X.beginPath(); X.arc(cx, cy + 195, 16, 0, Math.PI * 2); X.fill();
+  }
+  X.restore();
+}
+
+function lineup(t, cx, cy) {
+  const a0 = fade(t, 0, LINE_T + 0.1, 0.3);
+  if (a0 > 0) {
+    text('5', cx, cy - 120, 420, CYAN, H1, 700, 'center', a0);
+    text('devices.', cx, cy + 150, 110, '#fff', H1, 700, 'center', a0);
+    text('One mission.', cx, cy + 270, 60, DIM, H1, 500, 'center', a0);
+  }
+  LINEUP.forEach(([num, name, sub, kind], i) => {
+    const s = LINE_T + i * LINE_EACH, lt = t - s;
+    const a = fade(t, s, s + LINE_EACH + 0.05, 0.25);
+    if (a <= 0) return;
+    const slide = 80 * (1 - ease(lt / 0.4));
+    X.save(); X.globalAlpha = a; X.translate(slide, 0);
+    device(kind, cx, cy - 60, lt);
+    X.restore();
+    text(num, cx, cy - 640, 64, CYAN, H1, 700, 'center', a);
+    text(name, cx, cy - 560, 88, '#fff', H1, 700, 'center', a);
+    text(sub, cx, cy + 560, 46, DIM, TX, 400, 'center', a);
+    // progress pips
+    for (let k = 0; k < LINEUP.length; k++) {
+      X.save(); X.globalAlpha = a; X.fillStyle = k === i ? CYAN : 'rgba(138,151,173,0.35)';
+      X.beginPath(); X.arc(cx - 100 + k * 50, cy + 680, k === i ? 10 : 7, 0, Math.PI * 2); X.fill(); X.restore();
+    }
+  });
+}
+
+function postLineup() {
+  size(1080, 1350); background(3);
+  text('5 devices. One mission.', W / 2, 150, 76, '#fff', H1, 700);
+  const pos = [[200, 430, 0.34], [540, 430, 0.34], [880, 430, 0.34], [300, 900, 0.4], [780, 900, 0.4]];
+  LINEUP.forEach(([num, name, , kind], i) => {
+    const [x, y, k] = pos[i];
+    X.save(); X.translate(x, y - 40); X.scale(k, k); device(kind, 0, 0, 0.9); X.restore();
+    text(num, x, y + 150, 30, CYAN, H1, 700);
+    text(name, x, y + 195, 32, '#fff', H1, 700);
+  });
+  text('Coming soon.', W / 2, 1180, 44, DIM, H1, 500);
+}
+
 /* ---------------- Reel (1080x1920) ---------------- */
 // Timeline in seconds. Screenshot scenes are inserted before the end card.
-function reelLength() { return 15 + Math.min(shots.length, 3) * 1.6; }
+const LINE_START = 12;
+function reelLength() { return 15 + lineupLength() + Math.min(shots.length, 3) * 1.6; }
 
 function reel(t) {
   size(1080, 1920); background(t);
   const cx = W / 2, cy = Hh / 2;
-  const shotStart = 12, shotEnd = 12 + Math.min(shots.length, 3) * 1.6;
+  const shotStart = LINE_START + lineupLength(), shotEnd = shotStart + Math.min(shots.length, 3) * 1.6;
+  if (t >= LINE_START - 0.3 && t < shotStart + 0.3) lineup(t - LINE_START, cx, cy);
 
   // 0–3s: 10 G, with shake
   let a = fade(t, 0, 3.1);

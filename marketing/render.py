@@ -37,7 +37,7 @@ def main():
         page.evaluate("urls => loadShots(urls)", [data_url(p) for p in shots])
         canvas = page.locator("#c")
 
-        posts = ["post1()", "post2()"] + [f"postShot({i})" for i in range(len(shots))]
+        posts = ["post1()", "post2()", "postLineup()"] + [f"postShot({i})" for i in range(len(shots))]
         for n, call in enumerate(posts, 1):
             page.evaluate(call)
             canvas.screenshot(path=str(OUT / f"post_{n}.png"))
