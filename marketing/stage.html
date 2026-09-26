@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="fonts/fonts.css" rel="stylesheet">
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Deterministic renderer: every frame is a pure function of (mode, t),
+// so render.py can step time frame by frame and screenshot the canvas.
+const C = document.getElementById('c');
+const X = C.getContext('2d');
+const H1 = '"Space Grotesk", "DejaVu Sans", sans-serif';
+const TX = 'Inter, "DejaVu Sans", sans-serif';
+const BG = '#05070d', CYAN = '#2ee6ff', RED = '#ff3b3b', DIM = '#8a97ad';
+let W = 1080, Hh = 1920;
+const shots = [];            // screenshot Image objects, filled by loadShots()
+
+function size(w, h) { W = w; Hh = h; C.width = w; C.height = h; }
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const ease = t => 1 - Math.pow(1 - clamp(t), 3);
+const fade = (t, a, b, f = 0.4) => clamp((t - a) / f) * clamp((b - t) / f);
+
+// Seeded noise so particles are identical across renders.
+function rng(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
+
+function background(t) {
+  X.fillStyle = BG; X.fillRect(0, 0, W, Hh);
+  const g = X.createRadialGradient(W / 2, Hh * 0.45, 0, W / 2, Hh * 0.45, Hh * 0.7);
+  g.addColorStop(0, 'rgba(46,230,255,0.10)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  X.fillStyle = g; X.fillRect(0, 0, W, Hh);
+  // faint grid
+  X.strokeStyle = 'rgba(138,151,173,0.07)'; X.lineWidth = 1;
+  for (let x = 0; x < W; x += 60) { X.beginPath(); X.moveTo(x, 0); X.lineTo(x, Hh); X.stroke(); }
+  for (let y = (t * 20) % 60; y < Hh; y += 60) { X.beginPath(); X.moveTo(0, y); X.lineTo(W, y); X.stroke(); }
+}
+
+// Magnetic field lines: dipole-ish arcs wrapping a central body.
+function fieldLines(t, alpha, cx, cy, scale = 1) {
+  X.save(); X.globalAlpha = alpha; X.lineWidth = 3;
+  for (let i = 1; i <= 7; i++) {
+    const r = 70 * i * scale;
+    X.strokeStyle = `rgba(46,230,255,${0.55 - i * 0.06})`;
+    X.setLineDash([18, 14]); X.lineDashOffset = -t * 60 * (i % 2 ? 1 : -1);
+    X.beginPath(); X.ellipse(cx - r * 0.55, cy, r * 0.6, r, 0, 0, Math.PI * 2); X.stroke();
+    X.beginPath(); X.ellipse(cx + r * 0.55, cy, r * 0.6, r, 0, 0, Math.PI * 2); X.stroke();
+  }
+  X.restore();
+}
+
+// Water droplets drifting upward, being "pushed" by the field.
+function droplets(t, alpha, count = 70) {
+  const r = rng(7);
+  X.save(); X.globalAlpha = alpha;
+  for (let i = 0; i < count; i++) {
+    const x = r() * W, sp = 40 + r() * 120, s = 4 + r() * 10, ph = r() * Hh;
+    const y = Hh - ((ph + t * sp) % (Hh + 40));
+    X.fillStyle = `rgba(46,230,255,${0.25 + r() * 0.5})`;
+    X.beginPath(); X.arc(x + Math.sin(t * 2 + i) * 10, y, s, 0, Math.PI * 2); X.fill();
+  }
+  X.restore();
+}
+
+function text(str, x, y, px, color, font = H1, weight = 700, align = 'center', alpha = 1) {
+  X.save(); X.globalAlpha = alpha; X.fillStyle = color; X.textAlign = align;
+  X.textBaseline = 'middle'; X.font = `${weight} ${px}px ${font}`; X.fillText(str, x, y); X.restore();
+}
+
+function brand(alpha = 1, y = Hh - 90) {
+  text('MADD PEMF', W / 2, y, 34, '#fff', H1, 700, 'center', alpha * 0.9);
+  X.save(); X.globalAlpha = alpha * 0.7; X.fillStyle = CYAN;
+  X.fillRect(W / 2 - 40, y + 30, 80, 4); X.restore();
+}
+
+// Draws a screenshot cropped, darkened and partly blurred: a tease, not a reveal.
+function teaseShot(img, t, alpha, box) {
+  if (!img) return;
+  const [bx, by, bw, bh] = box;
+  X.save(); X.globalAlpha = alpha;
+  X.beginPath(); X.roundRect(bx, by, bw, bh, 28); X.clip();
+  const k = Math.max(bw / img.width, bh / img.height) * (1.25 + 0.08 * t);
+  const iw = img.width * k, ih = img.height * k;
+  X.filter = 'blur(10px) brightness(0.55) saturate(1.2)';
+  X.drawImage(img, bx + (bw - iw) / 2, by + (bh - ih) / 2, iw, ih);
+  // sharp scanning band reveals a sliver of detail
+  const band = by + ((t * 0.35) % 1) * bh;
+  X.filter = 'brightness(0.95)';
+  X.beginPath(); X.rect(bx, band - 60, bw, 120); X.clip();
+  X.drawImage(img, bx + (bw - iw) / 2, by + (bh - ih) / 2, iw, ih);
+  X.restore();
+  X.save(); X.globalAlpha = alpha; X.strokeStyle = CYAN; X.lineWidth = 3;
+  X.beginPath(); X.roundRect(bx, by, bw, bh, 28); X.stroke(); X.restore();
+  text('CLASSIFIED PREVIEW', bx + 30, by + 44, 26, CYAN, TX, 600, 'left', alpha);
+}
+
+/* ---------------- Reel (1080x1920) ---------------- */
+// Timeline in seconds. Screenshot scenes are inserted before the end card.
+function reelLength() { return 15 + Math.min(shots.length, 3) * 1.6; }
+
+function reel(t) {
+  size(1080, 1920); background(t);
+  const cx = W / 2, cy = Hh / 2;
+  const shotStart = 12, shotEnd = 12 + Math.min(shots.length, 3) * 1.6;
+
+  // 0–3s: 10 G, with shake
+  let a = fade(t, 0, 3.1);
+  if (a > 0) {
+    const sh = 14 * clamp(1 - t / 3) * Math.sin(t * 90);
+    text('10', cx + sh, cy - 80, 420, RED, H1, 700, 'center', a);
+    text('G', cx + sh, cy + 150, 160, '#fff', H1, 700, 'center', a);
+    text('the force of a high-G turn', cx, cy + 300, 44, DIM, TX, 400, 'center', a);
+  }
+  // 3–6s: count down to 2
+  a = fade(t, 3, 6.1);
+  if (a > 0) {
+    const n = Math.round(10 - 8 * ease((t - 3.3) / 1.6));
+    const col = n > 5 ? RED : CYAN;
+    text('What if it felt like', cx, cy - 330, 60, '#fff', H1, 500, 'center', a);
+    text(String(n), cx, cy - 20, 420, col, H1, 700, 'center', a);
+    text('G', cx, cy + 210, 160, '#fff', H1, 700, 'center', a);
+  }
+  // 6–9s: 70% water
+  a = fade(t, 6, 9.1);
+  if (a > 0) {
+    droplets(t, a);
+    const pct = Math.round(70 * ease((t - 6.2) / 1.4));
+    text(pct + '%', cx, cy - 60, 300, CYAN, H1, 700, 'center', a);
+    text('of your body is water.', cx, cy + 150, 60, '#fff', H1, 500, 'center', a);
+  }
+  // 9–12s: diamagnetism
+  a = fade(t, 9, 12.1);
+  if (a > 0) {
+    fieldLines(t, a * 0.9, cx, cy - 40);
+    text('Water is', cx, cy - 520, 64, '#fff', H1, 500, 'center', a);
+    text('DIAMAGNETIC', cx, cy - 420, 104, CYAN, H1, 700, 'center', a);
+    text('A magnetic force acts on', cx, cy + 480, 48, '#fff', TX, 400, 'center', a);
+    text('every cell at once.', cx, cy + 550, 48, '#fff', TX, 600, 'center', a);
+  }
+  // screenshot teasers
+  shots.slice(0, 3).forEach((img, i) => {
+    const s = shotStart + i * 1.6, aa = fade(t, s, s + 1.7, 0.3);
+    if (aa > 0) {
+      fieldLines(t, aa * 0.35, cx, cy);
+      teaseShot(img, t - s, aa, [90, 420, 900, 1080]);
+      text('In development.', cx, 1640, 56, '#fff', H1, 500, 'center', aa);
+    }
+  });
+  // end card
+  a = fade(t, shotEnd, reelLength() + 1, 0.5);
+  if (a > 0) {
+    fieldLines(t, a * 0.5, cx, cy - 120, 0.8);
+    text('Magnetism × the human body.', cx, cy - 120, 58, '#fff', H1, 700, 'center', a);
+    text('Coming soon.', cx, cy + 0, 58, CYAN, H1, 700, 'center', a);
+    brand(a, cy + 220);
+  }
+}
+
+/* ---------------- Carousel posts (1080x1350) ---------------- */
+function post1() {
+  size(1080, 1350); background(0);
+  const cx = W / 2;
+  text('10 G.', cx, 400, 300, RED, H1, 700);
+  text('Feels like 2?', cx, 640, 130, CYAN, H1, 700);
+  text('Your body is ~70% water.', cx, 900, 50, '#fff', TX, 600);
+  text('Water responds to magnetic fields.', cx, 970, 44, DIM, TX, 400);
+  text('Swipe →', W - 70, Hh - 90, 36, CYAN, TX, 600, 'right');
+  brand(1);
+}
+
+function post2() {
+  size(1080, 1350); background(2);
+  const cx = W / 2;
+  fieldLines(2, 1, cx, 560, 0.9);
+  text('DIAMAGNETIC', cx, 200, 110, CYAN, H1, 700);
+  text('Magnetic force acts on every cell', cx, 900, 46, '#fff', TX, 600);
+  text('at once — the way gravity does.', cx, 960, 46, '#fff', TX, 600);
+  text('1997: a living frog was levitated', cx, 1070, 38, DIM, TX, 400);
+  text('unharmed in a 16-tesla field.', cx, 1120, 38, DIM, TX, 400);
+  brand(1);
+}
+
+function postShot(i) {
+  size(1080, 1350); background(i);
+  fieldLines(1 + i, 0.3, W / 2, Hh / 2);
+  teaseShot(shots[i], 1.2 + i, 1, [80, 140, 920, 980]);
+  text('In development.', W / 2, 1200, 56, '#fff', H1, 500);
+  brand(1, Hh - 60);
+}
+
+async function loadShots(urls) {
+  for (const u of urls) {
+    const img = new Image(); img.src = u; await img.decode(); shots.push(img);
+  }
+}
+window.ready = Promise.all(['700 100px "Space Grotesk"','500 100px "Space Grotesk"','400 40px Inter','600 40px Inter']
+  .map(f => document.fonts.load(f))).then(() => document.fonts.ready);
+</script>
+</body>
+</html>
