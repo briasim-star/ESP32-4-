@@ -22,7 +22,7 @@
 #include "pins.h"
 #include "lab_types.h"
 
-const char* FIRMWARE_VERSION = "0.3.2";   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
+const char* FIRMWARE_VERSION = "0.4.0";   // 0.4.0: plain-words MAIN screen + SETTINGS screen (Brian 2026-10-11: "clean this up")   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
 
 #define PIN_DRV_PWM   PIN_MD10C_PWM   // 25
 #define PIN_DRV_DIR   PIN_MD10C_DIR   // 32
@@ -160,9 +160,9 @@ bool inRect(int px, int py, Rect r) { return px >= r.x && px < r.x + r.w && py >
 Rect stepperMinusRect(const Stepper& s) { return {s.x, s.y, 46, 40}; }
 Rect stepperValueRect(const Stepper& s) { return {s.x + 52, s.y, 100, 40}; }
 Rect stepperPlusRect(const Stepper& s)  { return {s.x + 158, s.y, 46, 40}; }
-Stepper stFreq  = {"FREQUENCY Hz", 20, 70, 10, 1, 200, 1};
-Stepper stDuty  = {"DUTY %",      250, 70, 50, 1, 99, 5};
-Stepper stPower = {"POWER % of 24 V", 20, 140, 20, 0, 100, 5};
+Stepper stFreq  = {"FREQUENCY  Hz",      20, 144, 10, 1, 200, 1};     // main screen, left
+Stepper stPower = {"POWER  % of 24 V",   250, 144, 20, 0, 100, 5};     // main screen, right
+Stepper stDuty  = {"PULSE WIDTH %  (UNI / PULSE)  =  hover gain", 20, 184, 50, 1, 99, 5};   // settings screen
 void drawStepper(const Stepper& s) {
   fillAurora(s.x, s.y - 24, 206, 22); tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(s.y - 12)); tft.setTextDatum(TL_DATUM); tft.drawString(s.label, s.x, s.y - 22);
   drawButton(stepperMinusRect(s), "-"); drawButton(stepperPlusRect(s), "+");
@@ -175,11 +175,15 @@ bool handleStepperTouch(Stepper& s, int x, int y) {
   if (s.value < s.minVal) s.value = s.minVal; if (s.value > s.maxVal) s.value = s.maxVal; return true;
 }
 
-// ---- screen ------------------------------------------------------------------------
-Rect bMode = {250, 140, 100, 40}, bCoil = {356, 140, 104, 40};
-Rect bZero = {20, 196, 80, 40}, bPol = {106, 196, 90, 40}, bRun = {360, 196, 100, 40}, bStop = {360, 196, 100, 40};
-Rect rTrace = {21, 273, 438, 32};           // live Hall trace strip inside the Hall panel
-Rect rHall = {20, 246, 440, 60};
+// ---- screens: MAIN (what you need to run) + SETTINGS (coil, polarity, pulse width, sensor zero, touch) ------------
+int uiScreen = 0;                            // 0 = main, 1 = settings
+Rect bMode = {20, 52, 250, 40}, bSettings = {290, 52, 170, 40};
+Rect bRunStop = {20, 192, 440, 40};
+Rect rHall = {20, 238, 440, 68}, rTrace = {21, 262, 438, 43};
+Rect bBack = {360, 6, 100, 32}, bCoil = {20, 56, 440, 40}, bPol = {20, 104, 440, 40}, bZero = {20, 232, 440, 36}, bCal = {20, 276, 210, 32};
+static const char* MODE_HINTS[] = {"field flips + and - at the frequency", "one-way pulses, width = pulse width %", "steady field, no switching",
+                                   "1 to 60 Hz over 30 s, logs the peak", "flips the field to spin the ball", "holds the ball below (needs the sensor)",
+                                   "hover, with the ball moving up and down"};
 // ---- MADD hexagon logo (drawn, no SD card): pointed-top hexagon, rainbow wave stripes, magenta edge --------------
 void drawLogoHex(int cx, int cy, int r) {
   int half_w = (int)(r * 0.866f);
@@ -206,57 +210,85 @@ void drawSplash() {
   tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_MAGENTA, auroraAt(170)); tft.drawString("by The MADD Resonist", 230, 170);
   tft.setTextColor(MADD_DIM, auroraAt(200)); tft.drawString("coil + magnet experiments", 230, 200); tft.setTextDatum(TL_DATUM);
 }
-void drawHeader() {
-  fillAurora(0, 0, 480, 44); drawLogoHex(36, 21, 17); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT, auroraAt(10)); tft.setTextDatum(TL_DATUM); tft.drawString("MADD Flux 12  LAB", 62, 8);
-  for (int i = 0; i < 6; i++) tft.fillRect(62 + i * 62, 36, 60, 3, MADD_SPECTRUM[i]);
-  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(10)); tft.setTextDatum(TR_DATUM);
-  char v[16]; snprintf(v, sizeof(v), "v%s", FIRMWARE_VERSION); tft.drawString(v, 460, 12); tft.setTextDatum(TL_DATUM);
+void drawStatusPill() {                      // top-right: COIL OFF / RUNNING / COOLING, in words
+  char l[24]; uint16_t col = MADD_DIM;
+  if (running) { snprintf(l, sizeof(l), "RUNNING %lus", (unsigned long)((millis() - runStartMs) / 1000)); col = COLOR_GOOD; }
+  else if (millis() < cooldownUntilMs) { snprintf(l, sizeof(l), "COOLING %lus", (unsigned long)((cooldownUntilMs - millis()) / 1000)); col = COLOR_WARN; }
+  else snprintf(l, sizeof(l), "COIL OFF");
+  Rect r = {296, 8, 164, 30}; drawChamfer(r, MADD_PANEL, col, 7); tft.setFreeFont(FONT_SM); tft.setTextColor(col, MADD_PANEL); tft.setTextDatum(MC_DATUM);
+  tft.drawString(l, r.x + r.w / 2, r.y + r.h / 2); tft.setTextDatum(TL_DATUM);
 }
-void drawAll() {
-  fillAurora(0, 0, 480, 320); drawHeader();
-  stFreq.value = freqHz; stDuty.value = dutyPct; stPower.value = powerPct;
-  drawStepper(stFreq); drawStepper(stDuty); drawStepper(stPower);
-  drawButton(bMode, MODE_NAMES[mode], 1); drawButton(bCoil, COILS[coilIdx].name, coilIdx ? 4 : 0, FONT_SM);
-  drawButton(bZero, "ZERO", 0, FONT_SM); drawButton(bPol, bipolar ? "BI +/-" : "UNI +", bipolar ? 1 : 0, FONT_SM);
-  if (running) drawButton(bStop, "STOP", 3); else drawButton(bRun, millis() < cooldownUntilMs ? "COOL" : "RUN", millis() < cooldownUntilMs ? 4 : 2);
+void drawHeader(const char* title) {
+  fillAurora(0, 0, 480, 44); drawLogoHex(36, 21, 17); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT, auroraAt(10)); tft.setTextDatum(TL_DATUM); tft.drawString(title, 62, 8);
+  for (int i = 0; i < 6; i++) tft.fillRect(62 + i * 36, 36, 34, 3, MADD_SPECTRUM[i]);
+}
+void drawRunStop() {
+  if (running) drawButton(bRunStop, "STOP", 3);
+  else if (millis() < cooldownUntilMs) drawButton(bRunStop, "COOLING - wait", 4, FONT_SM);
+  else drawButton(bRunStop, "RUN", 2);
+}
+void drawMain() {
+  uiScreen = 0; fillAurora(0, 0, 480, 320); drawHeader("MADD Flux 12"); drawStatusPill();
+  char l[40]; snprintf(l, sizeof(l), "MODE: %s", MODE_NAMES[mode]); drawButton(bMode, l, 1); drawButton(bSettings, "SETTINGS", 0, FONT_SM);
+  fillAurora(20, 96, 440, 20); tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(100)); tft.setTextDatum(TL_DATUM); tft.drawString(MODE_HINTS[mode], 24, 98);
+  stFreq.value = freqHz; stPower.value = powerPct; drawStepper(stFreq); drawStepper(stPower);
+  drawRunStop();
   tft.fillRect(rHall.x, rHall.y, rHall.w, rHall.h, MADD_PANEL); tft.drawRect(rHall.x, rHall.y, rHall.w, rHall.h, MADD_EDGE);
   tft.drawFastHLine(rTrace.x, rTrace.y + rTrace.h / 2, rTrace.w, MADD_EDGE); trX = 0;
 }
+void drawSettings() {
+  uiScreen = 1; fillAurora(0, 0, 480, 320); drawHeader("SETTINGS"); drawButton(bBack, "BACK", 1, FONT_SM);
+  char l[64];
+  snprintf(l, sizeof(l), "COIL: %s   (%s)", coilIdx ? "BIG 16 AWG" : "STAR 20 AWG", coilIdx ? "power capped at 35%" : "full power OK"); drawButton(bCoil, l, coilIdx ? 4 : 0, FONT_SM);
+  snprintf(l, sizeof(l), "POLARITY: %s", bipolar ? "BI  (field flips + and -)" : "UNI  (one direction, pulses)"); drawButton(bPol, l, bipolar ? 1 : 0, FONT_SM);
+  stDuty.value = dutyPct; drawStepper(stDuty);
+  tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(195)); tft.setTextDatum(TL_DATUM); tft.drawString("1-99.  Only used by UNI, PULSE, HOVER, BOUNCE.", 236, 196);
+  drawButton(bZero, "ZERO THE FIELD SENSOR  (no magnet near it)", 0, FONT_SM);
+  drawButton(bCal, "RECALIBRATE TOUCH", 0, FONT_SM);
+  snprintf(l, sizeof(l), "v%s   log on USB 115200", FIRMWARE_VERSION); tft.setTextColor(MADD_DIM, auroraAt(290)); tft.drawString(l, 244, 284);
+}
 void drawTrace() {                             // one new column per call: sweep-scope style, no block shifting
+  if (uiScreen != 0) return;
   if (abs(hallA_peak) * 11 / 10 > trScale) trScale = abs(hallA_peak) * 11 / 10;
   int mid = rTrace.y + rTrace.h / 2, half = rTrace.h / 2 - 1;
   int y = mid - (int)((long)constrain(hallA_mV, -trScale, trScale) * half / trScale);
   int x = rTrace.x + trX;
   tft.drawFastVLine(x, rTrace.y, rTrace.h, MADD_PANEL); tft.drawPixel(x, mid, MADD_EDGE);
   tft.drawFastVLine(x, y - 1, 3, running ? MADD_CYAN : MADD_DIM);
-  int xc = rTrace.x + (trX + 1) % rTrace.w; tft.drawFastVLine(xc, rTrace.y, rTrace.h, MADD_COIL2);   // cursor
+  if (running) { int xc = rTrace.x + (trX + 1) % rTrace.w; tft.drawFastVLine(xc, rTrace.y, rTrace.h, MADD_COIL2); }   // sweep cursor only while the coil runs
   trX = (trX + 1) % rTrace.w;
 }
 void drawLive() {
+  if (uiScreen != 0) return;
   char l[64]; tft.setFreeFont(FONT_SM); tft.setTextDatum(TL_DATUM);
-  tft.fillRect(rHall.x + 1, rHall.y + 1, rHall.w - 2, 24, MADD_PANEL); tft.setTextColor(MADD_TEXT, MADD_PANEL);
-  if (mode == SPIN) snprintf(l, sizeof(l), "HALL %5d mV  pk %5d   %d rpm", hallA_mV, hallA_peak, rpm);
-  else snprintf(l, sizeof(l), "HALL %5d mV  pk %5d   +-%d", hallA_mV, hallA_peak, trScale);
-  tft.drawString(l, rHall.x + 10, rHall.y + 6);
-  fillAurora(204, 196, 150, 40); tft.setTextColor(running ? COLOR_GOOD : MADD_DIM, auroraAt(210)); tft.setTextDatum(TL_DATUM);
-  if (running && mode == SPIN) { uint32_t s = (millis() - runStartMs) / 1000; snprintf(l, sizeof(l), "%lus %d rpm", (unsigned long)s, rpm); }
-  else if (running && (mode == HOVER || mode == BOUNCE)) { uint32_t s = (millis() - runStartMs) / 1000; snprintf(l, sizeof(l), "%lus d%d%%", (unsigned long)s, hoverDuty * 100 / 255); }
-  else if (running) { uint32_t s = (millis() - runStartMs) / 1000; snprintf(l, sizeof(l), "%lus %.1fHz %.1fA", (unsigned long)s, mode == SWEEP ? sweepF : (float)freqHz, 24.0f * powerToDuty(powerPct) / 255 / COILS[coilIdx].ohms); }
-  else if (millis() < cooldownUntilMs) snprintf(l, sizeof(l), "cool %lus", (unsigned long)((cooldownUntilMs - millis()) / 1000));
-  else snprintf(l, sizeof(l), "ready USB 115200");
-  tft.drawString(l, 208, 206);
+  tft.fillRect(rHall.x + 1, rHall.y + 1, rHall.w - 2, 22, MADD_PANEL); tft.setTextColor(MADD_TEXT, MADD_PANEL);
+  if (mode == SPIN) snprintf(l, sizeof(l), "FIELD %5d mV   peak %5d   %d rpm", hallA_mV, hallA_peak, rpm);
+  else if (running && (mode == HOVER || mode == BOUNCE)) snprintf(l, sizeof(l), "FIELD %5d mV   target %d   coil %d%%", hallA_mV, hoverTarget, hoverDuty * 100 / 255);
+  else if (running) snprintf(l, sizeof(l), "FIELD %5d mV   peak %5d   %.1f Hz  ~%.1f A", hallA_mV, hallA_peak, mode == SWEEP ? sweepF : (float)freqHz, 24.0f * powerToDuty(powerPct) / 255 / COILS[coilIdx].ohms);
+  else snprintf(l, sizeof(l), "FIELD %5d mV   peak %5d", hallA_mV, hallA_peak);
+  tft.drawString(l, rHall.x + 8, rHall.y + 5);
+  static bool wasRunning = false; static bool wasCooling = false; bool cooling = !running && millis() < cooldownUntilMs;
+  if (running != wasRunning || cooling != wasCooling) { drawRunStop(); wasRunning = running; wasCooling = cooling; }
+  drawStatusPill();
 }
+void drawAll() { if (uiScreen == 1) drawSettings(); else drawMain(); }
 void persist() { prefs.putInt("f", freqHz); prefs.putInt("d", dutyPct); prefs.putInt("p", powerPct); prefs.putInt("m", mode); prefs.putInt("c", coilIdx); prefs.putBool("bp", bipolar); }
 void handleTouch(int x, int y) {
   bool changed = false;
-  if (handleStepperTouch(stFreq, x, y)) { freqHz = stFreq.value; changed = true; if (running && mode != SWEEP) applyOutput(); drawStepper(stFreq); }
-  else if (handleStepperTouch(stDuty, x, y)) { dutyPct = stDuty.value; changed = true; drawStepper(stDuty); }
-  else if (handleStepperTouch(stPower, x, y)) { powerPct = min(stPower.value, COILS[coilIdx].powerCap); stPower.value = powerPct; changed = true; if (running) applyOutput(); drawStepper(stPower); }
-  else if (inRect(x, y, bMode)) { stopRun("mode change"); mode = (Mode)((mode + 1) % 7); changed = true; drawAll(); }
-  else if (inRect(x, y, bCoil)) { stopRun("coil change"); coilIdx = (coilIdx + 1) % 2; if (powerPct > COILS[coilIdx].powerCap) powerPct = COILS[coilIdx].powerCap; changed = true; drawAll(); }
-  else if (inRect(x, y, bZero)) { zeroHall(); trScale = 300; }
-  else if (inRect(x, y, bPol)) { bipolar = !bipolar; changed = true; if (running) applyOutput(); drawAll(); }
-  else if (inRect(x, y, bRun)) { if (running) stopRun("button"); else startRun(); drawAll(); }
+  if (uiScreen == 0) {
+    if (handleStepperTouch(stFreq, x, y)) { freqHz = stFreq.value; changed = true; if (running && mode != SWEEP) applyOutput(); drawStepper(stFreq); }
+    else if (handleStepperTouch(stPower, x, y)) { powerPct = min(stPower.value, COILS[coilIdx].powerCap); stPower.value = powerPct; changed = true; if (running) applyOutput(); drawStepper(stPower); }
+    else if (inRect(x, y, bMode)) { stopRun("mode change"); mode = (Mode)((mode + 1) % 7); changed = true; drawMain(); }
+    else if (inRect(x, y, bSettings)) { drawSettings(); return; }
+    else if (inRect(x, y, bRunStop)) { if (running) stopRun("button"); else startRun(); drawRunStop(); }
+  } else {
+    if (inRect(x, y, bBack)) { drawMain(); drawLive(); return; }
+    else if (inRect(x, y, bCoil)) { stopRun("coil change"); coilIdx = (coilIdx + 1) % 2; if (powerPct > COILS[coilIdx].powerCap) powerPct = COILS[coilIdx].powerCap; changed = true; drawSettings(); }
+    else if (inRect(x, y, bPol)) { bipolar = !bipolar; changed = true; if (running) applyOutput(); drawSettings(); }
+    else if (handleStepperTouch(stDuty, x, y)) { dutyPct = stDuty.value; changed = true; drawStepper(stDuty); }
+    else if (inRect(x, y, bZero)) { zeroHall(); trScale = 300; drawButton(bZero, "SENSOR ZEROED", 2, FONT_SM); delay(400); drawButton(bZero, "ZERO THE FIELD SENSOR  (no magnet near it)", 0, FONT_SM); }
+    else if (inRect(x, y, bCal)) { prefs.remove("cal"); ESP.restart(); }
+  }
   if (changed) persist();
   drawLive();
 }
@@ -277,7 +309,7 @@ void setup() {
   zeroHall(); esp_task_wdt_init(5, true); esp_task_wdt_add(NULL);
   xTaskCreatePinnedToCore(controlLoop, "ctl", 4096, NULL, 2, &ctlTask, 0);   // core 0, away from loop()
   drawSplash(); delay(1800);
-  drawAll(); drawLive();
+  drawMain(); drawLive();
 }
 void loop() {
   esp_task_wdt_reset();
@@ -285,10 +317,10 @@ void loop() {
   if (tft.getTouch(&x, &y)) { handleTouch(x, y); delay(110); }   // ~9 steps/s when held
   readHall();
   if (running) {
-    if (millis() - runStartMs >= RUN_MAX_S * 1000UL) { stopRun("time cap"); drawAll(); }
+    if (millis() - runStartMs >= RUN_MAX_S * 1000UL) { stopRun("time cap"); drawRunStop(); }
     if (mode == SWEEP && millis() - sweepStepMs >= 1000) {
       Serial.printf("# sweep %.1f Hz peakA %d mV\n", sweepF, sweepPeak); sweepPeak = 0; sweepStepMs = millis();
-      sweepF += 59.0f / 30.0f; if (sweepF > 60.0f) { stopRun("sweep done"); drawAll(); } else applyOutput();
+      sweepF += 59.0f / 30.0f; if (sweepF > 60.0f) { stopRun("sweep done"); drawRunStop(); } else applyOutput();
     }
     if (millis() - lastLogMs >= 100) { lastLogMs = millis(); Serial.printf("%lu,%s,%s,%.1f,%d,%d,%d,%d\n", (unsigned long)(millis() - runStartMs), MODE_NAMES[mode], COILS[coilIdx].name, mode == SWEEP ? sweepF : (float)freqHz, dutyPct, (mode == HOVER || mode == BOUNCE) ? hoverDuty * 100 / 255 : powerPct, hallA_mV, hallB_mV); }
   }
