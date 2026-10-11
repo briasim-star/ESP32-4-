@@ -19,10 +19,11 @@
 #include <TFT_eSPI.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <esp_sleep.h>
 #include "pins.h"
 #include "lab_types.h"
 
-const char* FIRMWARE_VERSION = "0.4.0";   // 0.4.0: plain-words MAIN screen + SETTINGS screen (Brian 2026-10-11: "clean this up")   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
+const char* FIRMWARE_VERSION = "0.4.1";   // 0.4.1: MODE picker screen (all modes listed) + OFF button (deep sleep, tap to wake)   // 0.4.0: plain-words MAIN screen + SETTINGS screen (Brian 2026-10-11: "clean this up")   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
 
 #define PIN_DRV_PWM   PIN_MD10C_PWM   // 25
 #define PIN_DRV_DIR   PIN_MD10C_DIR   // 32
@@ -176,10 +177,11 @@ bool handleStepperTouch(Stepper& s, int x, int y) {
 }
 
 // ---- screens: MAIN (what you need to run) + SETTINGS (coil, polarity, pulse width, sensor zero, touch) ------------
-int uiScreen = 0;                            // 0 = main, 1 = settings
+int uiScreen = 0;                            // 0 = main, 1 = settings, 2 = mode picker
 Rect bMode = {20, 52, 250, 40}, bSettings = {290, 52, 170, 40};
 Rect bRunStop = {20, 192, 440, 40};
 Rect rHall = {20, 238, 440, 68}, rTrace = {21, 262, 438, 43};
+Rect bOff = {236, 8, 54, 30}, bOffBig = {20, 276, 210, 32};
 Rect bBack = {360, 6, 100, 32}, bCoil = {20, 56, 440, 40}, bPol = {20, 104, 440, 40}, bZero = {20, 232, 440, 36}, bCal = {20, 276, 210, 32};
 static const char* MODE_HINTS[] = {"field flips + and - at the frequency", "one-way pulses, width = pulse width %", "steady field, no switching",
                                    "1 to 60 Hz over 30 s, logs the peak", "flips the field to spin the ball", "holds the ball below (needs the sensor)",
@@ -229,7 +231,8 @@ void drawRunStop() {
 }
 void drawMain() {
   uiScreen = 0; fillAurora(0, 0, 480, 320); drawHeader("MADD Flux 12"); drawStatusPill();
-  char l[40]; snprintf(l, sizeof(l), "MODE: %s", MODE_NAMES[mode]); drawButton(bMode, l, 1); drawButton(bSettings, "SETTINGS", 0, FONT_SM);
+  drawButton(bOff, "OFF", 3, FONT_SM);
+  char l[40]; snprintf(l, sizeof(l), "MODE: %s  (tap to pick)", MODE_NAMES[mode]); drawButton(bMode, l, 1, FONT_SM); drawButton(bSettings, "SETTINGS", 0, FONT_SM);
   fillAurora(20, 96, 440, 20); tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(100)); tft.setTextDatum(TL_DATUM); tft.drawString(MODE_HINTS[mode], 24, 98);
   stFreq.value = freqHz; stPower.value = powerPct; drawStepper(stFreq); drawStepper(stPower);
   drawRunStop();
@@ -244,8 +247,23 @@ void drawSettings() {
   stDuty.value = dutyPct; drawStepper(stDuty);
   tft.setFreeFont(FONT_SM); tft.setTextColor(MADD_DIM, auroraAt(195)); tft.setTextDatum(TL_DATUM); tft.drawString("1-99.  Only used by UNI, PULSE, HOVER, BOUNCE.", 236, 196);
   drawButton(bZero, "ZERO THE FIELD SENSOR  (no magnet near it)", 0, FONT_SM);
-  drawButton(bCal, "RECALIBRATE TOUCH", 0, FONT_SM);
-  snprintf(l, sizeof(l), "v%s   log on USB 115200", FIRMWARE_VERSION); tft.setTextColor(MADD_DIM, auroraAt(290)); tft.drawString(l, 244, 284);
+  drawButton(bCal, "RECALIBRATE TOUCH", 0, FONT_SM); drawButton(bOffBig, "POWER OFF", 3, FONT_SM);
+  snprintf(l, sizeof(l), "v%s  log on USB 115200", FIRMWARE_VERSION); tft.setTextColor(MADD_DIM, auroraAt(290)); tft.drawString(l, 244, 284);
+}
+void drawModePicker() {                       // all 7 modes on one screen, the current one lit
+  uiScreen = 2; fillAurora(0, 0, 480, 320); drawHeader("PICK A MODE"); drawButton(bBack, "BACK", 1, FONT_SM);
+  char l[80];
+  for (int i = 0; i < 7; i++) {
+    Rect r = {20, 50 + i * 38, 440, 34}; snprintf(l, sizeof(l), "%-7s %s", MODE_NAMES[i], MODE_HINTS[i]);
+    drawButton(r, l, i == mode ? 1 : 0, FONT_SM);
+  }
+}
+void powerOff() {                             // OFF button: coil off, screen dark, deep sleep; a tap on the screen wakes it (reboots)
+  stopRun("power off"); driverOff(); Serial.println("# OFF (deep sleep, tap screen to wake)"); Serial.flush();
+  fillAurora(0, 0, 480, 320); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_DIM, auroraAt(160)); tft.setTextDatum(MC_DATUM); tft.drawString("off - tap to wake", 240, 160); delay(900);
+  digitalWrite(TFT_BL, LOW); tft.writecommand(0x10);                         // backlight off, panel sleep-in
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0);                              // touch IRQ (IO36) goes LOW when pressed
+  esp_deep_sleep_start();
 }
 void drawTrace() {                             // one new column per call: sweep-scope style, no block shifting
   if (uiScreen != 0) return;
@@ -271,23 +289,30 @@ void drawLive() {
   if (running != wasRunning || cooling != wasCooling) { drawRunStop(); wasRunning = running; wasCooling = cooling; }
   drawStatusPill();
 }
-void drawAll() { if (uiScreen == 1) drawSettings(); else drawMain(); }
+void drawAll() { if (uiScreen == 1) drawSettings(); else if (uiScreen == 2) drawModePicker(); else drawMain(); }
 void persist() { prefs.putInt("f", freqHz); prefs.putInt("d", dutyPct); prefs.putInt("p", powerPct); prefs.putInt("m", mode); prefs.putInt("c", coilIdx); prefs.putBool("bp", bipolar); }
 void handleTouch(int x, int y) {
   bool changed = false;
   if (uiScreen == 0) {
     if (handleStepperTouch(stFreq, x, y)) { freqHz = stFreq.value; changed = true; if (running && mode != SWEEP) applyOutput(); drawStepper(stFreq); }
     else if (handleStepperTouch(stPower, x, y)) { powerPct = min(stPower.value, COILS[coilIdx].powerCap); stPower.value = powerPct; changed = true; if (running) applyOutput(); drawStepper(stPower); }
-    else if (inRect(x, y, bMode)) { stopRun("mode change"); mode = (Mode)((mode + 1) % 7); changed = true; drawMain(); }
+    else if (inRect(x, y, bMode)) { drawModePicker(); return; }
+    else if (inRect(x, y, bOff)) { powerOff(); }
     else if (inRect(x, y, bSettings)) { drawSettings(); return; }
     else if (inRect(x, y, bRunStop)) { if (running) stopRun("button"); else startRun(); drawRunStop(); }
-  } else {
+  } else if (uiScreen == 1) {
     if (inRect(x, y, bBack)) { drawMain(); drawLive(); return; }
     else if (inRect(x, y, bCoil)) { stopRun("coil change"); coilIdx = (coilIdx + 1) % 2; if (powerPct > COILS[coilIdx].powerCap) powerPct = COILS[coilIdx].powerCap; changed = true; drawSettings(); }
     else if (inRect(x, y, bPol)) { bipolar = !bipolar; changed = true; if (running) applyOutput(); drawSettings(); }
     else if (handleStepperTouch(stDuty, x, y)) { dutyPct = stDuty.value; changed = true; drawStepper(stDuty); }
     else if (inRect(x, y, bZero)) { zeroHall(); trScale = 300; drawButton(bZero, "SENSOR ZEROED", 2, FONT_SM); delay(400); drawButton(bZero, "ZERO THE FIELD SENSOR  (no magnet near it)", 0, FONT_SM); }
     else if (inRect(x, y, bCal)) { prefs.remove("cal"); ESP.restart(); }
+    else if (inRect(x, y, bOffBig)) { powerOff(); }
+  }
+  if (uiScreen == 2) {
+    if (inRect(x, y, bBack)) { drawMain(); drawLive(); return; }
+    for (int i = 0; i < 7; i++) { Rect r = {20, 50 + i * 38, 440, 34}; if (inRect(x, y, r)) { if (i != mode) { stopRun("mode change"); mode = (Mode)i; persist(); } drawMain(); drawLive(); return; } }
+    return;
   }
   if (changed) persist();
   drawLive();
