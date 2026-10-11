@@ -124,8 +124,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase || true
           git add docs/firmware_flux12lab
           git diff --cached --quiet && echo "No Flux12_Lab changes" && exit 0
           git commit -m "Auto-build Flux12_Lab firmware [skip ci]"
+          git pull --rebase    # the PEMF job may have pushed first: commit, THEN rebase, then push (run #235 failed the other way round)
           git push
