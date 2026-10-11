@@ -22,7 +22,7 @@
 #include "pins.h"
 #include "lab_types.h"
 
-const char* FIRMWARE_VERSION = "0.3.1";   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
+const char* FIRMWARE_VERSION = "0.3.2";   // 0.3.1: MADD hexagon logo badge + boot splash, live Hall trace (Brian's pick A, 2026-10-11)
 
 #define PIN_DRV_PWM   PIN_MD10C_PWM   // 25
 #define PIN_DRV_DIR   PIN_MD10C_DIR   // 32
@@ -69,7 +69,7 @@ void controlLoop(void*) {                      // ~1 kHz PID for HOVER / BOUNCE,
       duty = constrain(duty, 0, powerToDuty(COILS[coilIdx].powerCap)); hoverDuty = duty;
       digitalWrite(PIN_DRV_DIR, HIGH); ledcWrite(PWM_CH, duty);
     } else { hoverI = 0; lastErr = 0; t0 = millis(); }
-    delayMicroseconds(900);
+    vTaskDelay(1);                             // 1 ms tick: NEVER busy-wait here (0.3.1 starved the loop task -> watchdog reboot loop)
   }
 }
 
@@ -275,7 +275,7 @@ void setup() {
   else { fillAurora(0, 0, 480, 320); tft.setFreeFont(FONT_LG); tft.setTextColor(MADD_TEXT, auroraAt(160)); tft.setTextDatum(MC_DATUM); tft.drawString("Touch the corners", 240, 160);
          tft.calibrateTouch(cal, MADD_CYAN, auroraAt(0), 15); prefs.putBytes("cal", cal, sizeof(cal)); tft.setTouch(cal); }
   zeroHall(); esp_task_wdt_init(5, true); esp_task_wdt_add(NULL);
-  xTaskCreatePinnedToCore(controlLoop, "ctl", 4096, NULL, 2, &ctlTask, 1);
+  xTaskCreatePinnedToCore(controlLoop, "ctl", 4096, NULL, 2, &ctlTask, 0);   // core 0, away from loop()
   drawSplash(); delay(1800);
   drawAll(); drawLive();
 }
