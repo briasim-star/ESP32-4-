@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "PEMF_Controller/**"
-      - "Flux12_Lab/**"
       - "extras/**"
       - ".github/workflows/build_and_publish.yml"
   workflow_dispatch: {}
@@ -81,51 +80,4 @@ jobs:
           git add docs/firmware
           git diff --cached --quiet && echo "No firmware changes to commit" && exit 0
           git commit -m "Auto-build firmware [skip ci]"
-          git push
-
-  # MADD Flux 12 LAB (the hobby coil controller, its OWN board). Runs after the PEMF job so the two
-  # auto-commits never collide; runs even if the PEMF build fails. Writes only docs/firmware_flux12lab/.
-  flux12_lab:
-    needs: build
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Install arduino-cli
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          echo "$PWD/bin" >> "$GITHUB_PATH"
-      - name: Configure arduino-cli for ESP32
-        run: |
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32@2.0.17
-      - name: Install required libraries
-        run: |
-          arduino-cli lib update-index
-          arduino-cli lib install "TFT_eSPI"
-      - name: Apply our TFT_eSPI display configuration
-        run: cp extras/TFT_eSPI_User_Setup.h "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
-      - name: Compile Flux12_Lab
-        run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --export-binaries --output-dir build_flux12 Flux12_Lab/Flux12_Lab.ino
-      - name: Collect binaries
-        run: |
-          mkdir -p docs/firmware_flux12lab
-          cp build_flux12/Flux12_Lab.ino.bootloader.bin docs/firmware_flux12lab/bootloader.bin
-          cp build_flux12/Flux12_Lab.ino.partitions.bin docs/firmware_flux12lab/partitions.bin
-          cp build_flux12/Flux12_Lab.ino.bin            docs/firmware_flux12lab/firmware.bin
-          BOOT_APP0=$(find "$HOME/.arduino15/packages/esp32" -name "boot_app0.bin" | head -n1)
-          cp "$BOOT_APP0" docs/firmware_flux12lab/boot_app0.bin
-          grep -oP '(?<=FIRMWARE_VERSION = ")[^"]+' Flux12_Lab/Flux12_Lab.ino > docs/firmware_flux12lab/version.txt
-      - name: Commit and push Flux12_Lab firmware
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/firmware_flux12lab
-          git diff --cached --quiet && echo "No Flux12_Lab changes" && exit 0
-          git commit -m "Auto-build Flux12_Lab firmware [skip ci]"
-          git pull --rebase    # the PEMF job may have pushed first: commit, THEN rebase, then push (run #235 failed the other way round)
           git push
